@@ -1,0 +1,31 @@
+[project]
+name = "deep-agent-rca"
+version = "0.1.0"
+description = "Deterministic LangGraph RCA workflow with focused DeepAgents stages"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "click>=8.4.2",
+  "deepagents",
+  "langchain-google-genai",
+  "langgraph",
+  "psycopg2-binary",
+  "pydantic>=2",
+  "python-dotenv",
+  "rich>=15.0.0",
+]
+
+[project.scripts]
+deep-agent = "deep_agent.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

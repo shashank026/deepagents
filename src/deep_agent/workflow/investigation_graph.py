@@ -1,0 +1,34 @@
+from langgraph.graph import END, START, StateGraph
+
+from deep_agent.models.state import InvestigationState
+from deep_agent.nodes.evidence_collection import collect_evidence_node
+from deep_agent.nodes.evidence_validation import route_after_evidence_validation, validate_evidence_node
+from deep_agent.nodes.investigation import investigate_node, route_after_investigation
+from deep_agent.nodes.report_builder import build_final_report_node
+from deep_agent.nodes.root_cause import identify_root_cause_node
+from deep_agent.nodes.root_cause_validation import validate_root_cause_node
+
+
+def create_investigation_graph():
+    builder = StateGraph(InvestigationState)
+    builder.add_node("collect_evidence", collect_evidence_node)
+    builder.add_node("validate_evidence", validate_evidence_node)
+    builder.add_node("investigate", investigate_node)
+    builder.add_node("identify_root_cause", identify_root_cause_node)
+    builder.add_node("validate_root_cause", validate_root_cause_node)
+    builder.add_node("build_final_report", build_final_report_node)
+    builder.add_edge(START, "collect_evidence")
+    builder.add_edge("collect_evidence", "validate_evidence")
+    builder.add_conditional_edges("validate_evidence", route_after_evidence_validation, {
+        "investigate": "investigate", "collect_more_evidence": "collect_evidence",
+        "build_inconclusive_report": "build_final_report",
+    })
+    builder.add_conditional_edges("investigate", route_after_investigation, {
+        "collect_more_evidence": "collect_evidence", "identify_root_cause": "identify_root_cause",
+        "build_inconclusive_report": "build_final_report",
+        "build_result_report": "build_final_report",
+    })
+    builder.add_edge("identify_root_cause", "validate_root_cause")
+    builder.add_edge("validate_root_cause", "build_final_report")
+    builder.add_edge("build_final_report", END)
+    return builder.compile()
