@@ -8,9 +8,12 @@ from rich.console import Console
 
 from deep_agent.models.report import RootCauseReport
 from deep_agent.services.progress import bind_progress_sink, reset_progress_sink
+from deep_agent.services.database_context import bind_database_sources, reset_database_sources
 from deep_agent.workflow.investigation_graph import create_investigation_graph
 
 STAGE_MESSAGES = {
+    "extract_business_entities": "Extracting business entities",
+    "plan_evidence_sources": "Selecting evidence sources",
     "collect_evidence": "Collecting evidence",
     "validate_evidence": "Validating collected evidence",
     "investigate": "Comparing expected and observed state",
@@ -20,6 +23,8 @@ STAGE_MESSAGES = {
 }
 
 NEXT_STAGE_MESSAGES = {
+    "source_planning": "Selecting evidence sources",
+    "evidence_collection": "Collecting evidence",
     "evidence_validation": "Validating collected evidence",
     "investigation": "Comparing expected and observed state",
     "root_cause_analysis": "Evaluating root-cause hypotheses",
@@ -49,11 +54,18 @@ class WorkflowProgressCallback(BaseCallbackHandler):
         self.console.print(f"  [red]↳ Tool failed:[/] {error}")
 
 
-def initial_state(user_query: str, organization_id: str, project_id: str) -> dict:
+def initial_state(
+    user_query: str,
+    organization_id: str,
+    project_id: str,
+    database_sources: list[dict] | None = None,
+) -> dict:
     return {
         "investigation_id": str(uuid4()), "user_query": user_query,
         "organization_id": organization_id, "project_id": project_id,
+        "database_sources": database_sources or [],
         "extracted_entities": {}, "evidence": [], "evidence_collection_attempts": 0,
+        "query_understanding": None, "evidence_source_plan": None,
         "evidence_collection_errors": [], "requested_evidence": [],
         "investigation": None, "root_cause_analysis": None, "final_report": None,
         "current_stage": "starting", "failure_reason": None,
@@ -61,26 +73,42 @@ def initial_state(user_query: str, organization_id: str, project_id: str) -> dic
 
 
 async def investigate_issue(user_query: str, organization_id: str = "local",
-                            project_id: str = "default") -> RootCauseReport:
-    state = initial_state(user_query, organization_id, project_id)
-    final = await create_investigation_graph().ainvoke(
-        state, config={"recursion_limit": 20,
-                       "configurable": {"thread_id": state["investigation_id"]}},
+                            project_id: str = "default",
+                            database_sources: list[dict] | None = None) -> RootCauseReport:
+    state = initial_state(user_query, organization_id, project_id, database_sources)
+    token = bind_database_sources(
+        state["database_sources"],
+        {organization_id, project_id},
     )
-    return final["final_report"]
+    try:
+        final = await create_investigation_graph().ainvoke(
+            state, config={"recursion_limit": 20,
+                           "configurable": {"thread_id": state["investigation_id"]}},
+        )
+        return final["final_report"]
+    finally:
+        reset_database_sources(token)
 
 
 async def stream_investigation(user_query: str, organization_id: str = "local",
                                project_id: str = "default",
+                               database_sources: list[dict] | None = None,
                                callbacks: list | None = None) -> AsyncIterator[dict]:
-    state = initial_state(user_query, organization_id, project_id)
+    state = initial_state(user_query, organization_id, project_id, database_sources)
     graph = create_investigation_graph()
-    async for event in graph.astream(
-        state, config={"recursion_limit": 20, "callbacks": callbacks or [],
-                       "configurable": {"thread_id": state["investigation_id"]}},
-        stream_mode="updates",
-    ):
-        yield event
+    token = bind_database_sources(
+        state["database_sources"],
+        {organization_id, project_id},
+    )
+    try:
+        async for event in graph.astream(
+            state, config={"recursion_limit": 20, "callbacks": callbacks or [],
+                           "configurable": {"thread_id": state["investigation_id"]}},
+            stream_mode="updates",
+        ):
+            yield event
+    finally:
+        reset_database_sources(token)
 
 
 async def _run_cli(question: str, organization_id: str, project_id: str,
@@ -94,7 +122,7 @@ async def _run_cli(question: str, organization_id: str, project_id: str,
     report: RootCauseReport | None = None
     announced: str | None = None
     if show_progress:
-        announced = "collect_evidence"
+        announced = "extract_business_entities"
         console.print(f"[cyan]→ {STAGE_MESSAGES[announced]}[/]")
     try:
         async for event in stream_investigation(

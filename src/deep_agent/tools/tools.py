@@ -1,19 +1,33 @@
-import json
 import re
-from functools import lru_cache
-from pathlib import Path
+from deep_agent.services.database_context import database_sources
 
-SCHEMA_PATH = Path(__file__).resolve().parents[3] / "database_analyzer.json"
 
-with SCHEMA_PATH.open() as f:
-    SCHEMA = json.load(f)
+def _objects() -> list[dict]:
+    objects: list[dict] = []
+    for source in database_sources():
+        relationships = source.analysis.get("relationships", [])
+        for item in source.analysis.get("objects", []):
+            objects.append({
+                **item,
+                "connection_id": source.connection_id,
+                "provider": source.provider,
+                "_relationships": [
+                    relationship
+                    for relationship in relationships
+                    if (
+                        relationship.get("source_object") == item.get("name")
+                        or relationship.get("target_object") == item.get("name")
+                    )
+                ],
+            })
+    return objects
 
 
 def list_tables():
     """Return all tables in the database."""
     return [
         f"{obj['namespace']}.{obj['name']}"
-        for obj in SCHEMA["objects"]
+        for obj in _objects()
     ]
 
 
@@ -24,6 +38,7 @@ def _compact_object(obj: dict) -> dict:
         "name": obj["name"],
         "object_type": obj.get("object_type"),
         "description": obj.get("description"),
+        "relationships": obj.get("_relationships", []),
         "fields": [
             {
                 "name": field.get("name"),
@@ -60,12 +75,11 @@ def _tokens(text: str) -> set[str]:
     return {token for token in expanded if len(token) > 1}
 
 
-@lru_cache(maxsize=256)
 def retrieve_schema_context(query: str, limit: int = 8) -> list[dict]:
     """Lexically rank relevant schemas without embeddings or model calls."""
     query_tokens = _tokens(query)
     ranked: list[tuple[int, str, dict]] = []
-    for obj in SCHEMA["objects"]:
+    for obj in _objects():
         name = obj["name"].lower()
         name_tokens = _tokens(name)
         field_tokens = {
@@ -92,19 +106,59 @@ def retrieve_schema_context(query: str, limit: int = 8) -> list[dict]:
         family = re.sub(r"(?:_?20\d{2}(?:_?\d{2})*)$", "", obj["name"].lower())
         if family_counts.get(family, 0) >= 2:
             continue
-        selected.append(_compact_object(obj))
+        selected.append({
+            **_compact_object(obj),
+            "connection_id": obj["connection_id"],
+            "provider": obj["provider"],
+        })
         family_counts[family] = family_counts.get(family, 0) + 1
         if len(selected) >= max(1, min(limit, 20)):
             break
+
+    # Expand directly related objects while respecting the same small token
+    # budget. This improves JOIN/$lookup construction without embedding every
+    # schema in the model context.
+    selected_keys = {
+        (item["connection_id"], item["name"])
+        for item in selected
+    }
+    object_lookup = {
+        (obj["connection_id"], obj["name"]): obj
+        for obj in _objects()
+    }
+    for item in list(selected):
+        for relationship in item.get("relationships", []):
+            related_name = (
+                relationship.get("target_object")
+                if relationship.get("source_object") == item["name"]
+                else relationship.get("source_object")
+            )
+            key = (item["connection_id"], related_name)
+            if not related_name or key in selected_keys or key not in object_lookup:
+                continue
+            related = object_lookup[key]
+            selected.append({
+                **_compact_object(related),
+                "connection_id": related["connection_id"],
+                "provider": related["provider"],
+                "retrieval_reason": f"Related to {item['name']}",
+            })
+            selected_keys.add(key)
+            if len(selected) >= max(1, min(limit, 20)):
+                return selected
     return selected
 
 
 def get_table(table_name: str):
     """Return metadata for a specific table."""
-    for obj in SCHEMA["objects"]:
+    for obj in _objects():
         qualified_name = f"{obj['namespace']}.{obj['name']}"
         if obj["name"] == table_name or qualified_name == table_name:
-            return _compact_object(obj)
+            return {
+                **_compact_object(obj),
+                "connection_id": obj["connection_id"],
+                "provider": obj["provider"],
+            }
 
     return {
         "error": f"Table '{table_name}' not found."
@@ -117,12 +171,14 @@ def search_tables(keyword: str):
 
     results = []
 
-    for obj in SCHEMA["objects"]:
+    for obj in _objects():
         if keyword in obj["name"].lower():
             results.append(
                 {
                     "namespace": obj["namespace"],
-                    "name": obj["name"]
+                    "name": obj["name"],
+                    "connection_id": obj["connection_id"],
+                    "provider": obj["provider"],
                 }
             )
 

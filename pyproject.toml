@@ -7,12 +7,17 @@ requires-python = ">=3.11"
 dependencies = [
   "click>=8.4.2",
   "deepagents",
+  "fastapi>=0.115",
   "langchain-google-genai",
   "langgraph",
   "psycopg2-binary",
+  "pymongo>=4.13",
+  "pymysql>=1.1",
+  "oracledb>=3.0",
   "pydantic>=2",
   "python-dotenv",
   "rich>=15.0.0",
+  "uvicorn[standard]>=0.34",
 ]
 
 [project.scripts]

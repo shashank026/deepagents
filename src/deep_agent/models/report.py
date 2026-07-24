@@ -9,6 +9,8 @@ class ResultRecord(BaseModel):
 
 
 class RootCauseReport(BaseModel):
+    response_type: str = "analysis"
+    verification_status: str = "inconclusive"
     issue_summary: str = ""
     root_cause: str | None = None
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
