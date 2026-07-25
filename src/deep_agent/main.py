@@ -9,7 +9,15 @@ from rich.console import Console
 from deep_agent.models.report import RootCauseReport
 from deep_agent.services.progress import bind_progress_sink, reset_progress_sink
 from deep_agent.services.database_context import bind_database_sources, reset_database_sources
+from deep_agent.services.codebase_context import bind_codebase_sources, reset_codebase_sources
 from deep_agent.workflow.investigation_graph import create_investigation_graph
+
+# The workflow deliberately revisits evidence collection and validation up to three
+# times. LangGraph counts every node transition, including the final END transition,
+# so its small default limit can reject a healthy, bounded investigation while it is
+# completing. This ceiling remains well above the longest valid route while the
+# workflow's own attempt limits prevent unbounded execution.
+INVESTIGATION_RECURSION_LIMIT = 64
 
 STAGE_MESSAGES = {
     "extract_business_entities": "Extracting business entities",
@@ -59,14 +67,28 @@ def initial_state(
     organization_id: str,
     project_id: str,
     database_sources: list[dict] | None = None,
+    codebase_sources: list[dict] | None = None,
+    investigation_id: str | None = None,
+    organization_knowledge: list[dict] | None = None,
 ) -> dict:
     return {
-        "investigation_id": str(uuid4()), "user_query": user_query,
+        "investigation_id": investigation_id or str(uuid4()), "user_query": user_query,
         "organization_id": organization_id, "project_id": project_id,
         "database_sources": database_sources or [],
+        "codebase_sources": codebase_sources or [],
+        "organization_knowledge": organization_knowledge or [],
         "extracted_entities": {}, "evidence": [], "evidence_collection_attempts": 0,
         "query_understanding": None, "evidence_source_plan": None,
+        "investigation_plan": [], "repository_context": {},
+        "schema_context": {},
         "evidence_collection_errors": [], "requested_evidence": [],
+        "failed_assumptions": [], "tool_errors": [],
+        "retry_counts": {
+            "query": 0, "tool": 0, "hypothesis": 0, "output": 0,
+        },
+        "reasoning_calls": 0,
+        "insufficient_evidence": False,
+        "report_validation_errors": [],
         "investigation": None, "root_cause_analysis": None, "final_report": None,
         "current_stage": "starting", "failure_reason": None,
     }
@@ -74,41 +96,58 @@ def initial_state(
 
 async def investigate_issue(user_query: str, organization_id: str = "local",
                             project_id: str = "default",
-                            database_sources: list[dict] | None = None) -> RootCauseReport:
-    state = initial_state(user_query, organization_id, project_id, database_sources)
+                            database_sources: list[dict] | None = None,
+                            codebase_sources: list[dict] | None = None) -> RootCauseReport:
+    state = initial_state(
+        user_query, organization_id, project_id, database_sources, codebase_sources
+    )
     token = bind_database_sources(
         state["database_sources"],
         {organization_id, project_id},
     )
+    codebase_token = bind_codebase_sources(state["codebase_sources"])
     try:
         final = await create_investigation_graph().ainvoke(
-            state, config={"recursion_limit": 20,
+            state, config={"recursion_limit": INVESTIGATION_RECURSION_LIMIT,
                            "configurable": {"thread_id": state["investigation_id"]}},
         )
         return final["final_report"]
     finally:
         reset_database_sources(token)
+        reset_codebase_sources(codebase_token)
 
 
 async def stream_investigation(user_query: str, organization_id: str = "local",
                                project_id: str = "default",
                                database_sources: list[dict] | None = None,
-                               callbacks: list | None = None) -> AsyncIterator[dict]:
-    state = initial_state(user_query, organization_id, project_id, database_sources)
+                               codebase_sources: list[dict] | None = None,
+                               callbacks: list | None = None,
+                               investigation_id: str | None = None,
+                               organization_knowledge: list[dict] | None = None,
+                               ) -> AsyncIterator[dict]:
+    state = initial_state(
+        user_query, organization_id, project_id, database_sources,
+        codebase_sources, investigation_id, organization_knowledge
+    )
     graph = create_investigation_graph()
     token = bind_database_sources(
         state["database_sources"],
         {organization_id, project_id},
     )
+    codebase_token = bind_codebase_sources(state["codebase_sources"])
     try:
         async for event in graph.astream(
-            state, config={"recursion_limit": 20, "callbacks": callbacks or [],
-                           "configurable": {"thread_id": state["investigation_id"]}},
+            state, config={
+                "recursion_limit": INVESTIGATION_RECURSION_LIMIT,
+                "callbacks": callbacks or [],
+                "configurable": {"thread_id": state["investigation_id"]},
+            },
             stream_mode="updates",
         ):
             yield event
     finally:
         reset_database_sources(token)
+        reset_codebase_sources(codebase_token)
 
 
 async def _run_cli(question: str, organization_id: str, project_id: str,

@@ -63,11 +63,23 @@ def _satisfies_request(query: str, evidence: Evidence) -> bool:
         "rate", "percentage", "version", "title", "label",
     }
     requested_roles = query_tokens & attribute_roles
-    if requested_roles and not all(
-        any(role in field for field in normalized_fields)
-        for role in requested_roles
-    ):
-        return False
+    if requested_roles:
+        pricing_request = bool(
+            query_tokens & {"price", "pricing", "rate", "cost", "fee"}
+        )
+        has_pricing_values = (
+            pricing_request
+            and any(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                for value in normalized_fields.values()
+            )
+        )
+        if not has_pricing_values and not all(
+            any(role in field for field in normalized_fields)
+            for role in requested_roles
+        ):
+            return False
 
     if superlative:
         numeric_fields = [

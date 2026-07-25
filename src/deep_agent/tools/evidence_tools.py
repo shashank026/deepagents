@@ -15,6 +15,16 @@ from deep_agent.tools.tools import list_tables as _list_tables
 from deep_agent.tools.tools import search_tables as _search_tables
 from deep_agent.tools.tools import retrieve_schema_context as _retrieve_schema_context
 from deep_agent.tools.external_sources import search_codebase_files, search_log_files
+from deep_agent.tools.github import (
+    get_blob as _github_blob, get_commit as _github_commit,
+    get_contents as _github_contents, get_tree as _github_tree,
+    inspect_symbol as _github_inspect_symbol, search_code as _github_search,
+)
+from deep_agent.services.database_context import database_source
+from deep_agent.tools.web_research import (
+    fetch_public_page as _fetch_public_page,
+    search_public_web as _search_public_web,
+)
 
 
 async def _save(source: str, kind: EvidenceType, summary: str, content: dict[str, Any]):
@@ -60,6 +70,75 @@ async def search_database_objects(keyword: str) -> dict[str, Any]:
     results = _search_tables(keyword)
     return await _save("database_schema", EvidenceType.DATABASE_SCHEMA,
                        f"Searched database objects for {keyword!r}", {"matches": results})
+
+
+async def discover_field_values(
+    object_name: str,
+    field_name: str,
+    connection_id: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Discover representative stored values for one schema-verified field."""
+    schema = _get_table(object_name)
+    if schema.get("error"):
+        raise ValueError(schema["error"])
+    known_fields = {
+        field.get("name")
+        for field in schema.get("fields", [])
+    }
+    if field_name not in known_fields:
+        raise ValueError(
+            f"Field {field_name!r} is not present in analyzed schema for "
+            f"{object_name!r}"
+        )
+    source_id = connection_id or schema.get("connection_id")
+    source = database_source(source_id)
+    bounded_limit = max(1, min(limit, 50))
+    if source.provider == "mongodb":
+        result = _run_mongodb_query(
+            collection=schema["name"],
+            pipeline=[
+                {"$group": {"_id": f"${field_name}", "count": {"$sum": 1}}},
+                {"$sort": {"count": -1}},
+                {"$limit": bounded_limit},
+                {"$project": {
+                    "_id": 0,
+                    "value": "$_id",
+                    "count": 1,
+                }},
+            ],
+            connection_id=source.connection_id,
+        )
+    else:
+        if not all(
+            part.replace("_", "").isalnum()
+            for part in object_name.split(".")
+        ) or not field_name.replace("_", "").isalnum():
+            raise ValueError("Unsafe database identifier")
+        quote = "`" if source.provider == "mysql" else '"'
+        qualified = ".".join(
+            f"{quote}{part}{quote}" for part in object_name.split(".")
+        )
+        column = f"{quote}{field_name}{quote}"
+        result = _run_query(
+            (
+                f"SELECT {column} AS value, COUNT(*) AS count "
+                f"FROM {qualified} GROUP BY {column} "
+                f"ORDER BY count DESC"
+            ),
+            source.connection_id,
+        )
+    return await _save(
+        source.connection_id,
+        EvidenceType.DATABASE_RECORD,
+        f"Discovered representative values for {object_name}.{field_name}",
+        {
+            **result,
+            "object_name": object_name,
+            "field_name": field_name,
+            "semantic_discovery": True,
+        },
+    )
 
 
 async def run_safe_read_query(
@@ -142,12 +221,86 @@ async def run_safe_mongodb_query(
 
 
 async def search_codebase(query: str, max_results: int = 30) -> dict[str, Any]:
-    """Search the configured codebase for mappings, enums, and application logic."""
-    result = search_codebase_files(query, max_results)
+    """Search the connected GitHub repository for application logic."""
+    try:
+        result = _github_search(query, max_results=max_results)
+    except RuntimeError as exc:
+        if "No analyzed codebase" not in str(exc):
+            raise
+        result = search_codebase_files(query, max_results)
     reliability = EvidenceType.CONFIGURATION if result.get("unavailable") else EvidenceType.CODE_REFERENCE
     return await _save(
         "codebase", reliability,
         result.get("error") or f"Code search returned {len(result['matches'])} matches",
+        result,
+    )
+
+
+async def get_codebase_file(path: str, ref: str | None = None,
+                            connection_id: str | None = None) -> dict[str, Any]:
+    """Read a GitHub file or directory by path using the Contents API."""
+    result = _github_contents(path, ref, connection_id)
+    return await _save(
+        connection_id or "github", EvidenceType.CODE_REFERENCE,
+        f"Read codebase path {path}", {"result": result},
+    )
+
+
+async def get_codebase_commit(ref: str | None = None,
+                              connection_id: str | None = None) -> dict[str, Any]:
+    """Read immutable commit metadata for a branch, tag, or commit SHA."""
+    result = _github_commit(ref, connection_id)
+    return await _save(
+        connection_id or "github", EvidenceType.CODE_REFERENCE,
+        f"Read commit {ref or 'configured branch'}", {"commit": result},
+    )
+
+
+async def get_codebase_tree(sha: str, recursive: bool = True,
+                            connection_id: str | None = None) -> dict[str, Any]:
+    """List repository files and paths from a Git tree SHA."""
+    result = _github_tree(sha, recursive, connection_id)
+    return await _save(
+        connection_id or "github", EvidenceType.CODE_REFERENCE,
+        f"Read Git tree {sha}", result,
+    )
+
+
+async def get_codebase_blob(sha: str,
+                            connection_id: str | None = None) -> dict[str, Any]:
+    """Read one repository file by its immutable Git blob SHA."""
+    result = _github_blob(sha, connection_id)
+    return await _save(
+        connection_id or "github", EvidenceType.CODE_REFERENCE,
+        f"Read Git blob {sha}", result,
+    )
+
+
+async def inspect_codebase_symbol(
+    symbol: str,
+    path: str | None = None,
+    connection_id: str | None = None,
+    context_lines: int = 12,
+) -> dict[str, Any]:
+    """Persist focused source snippets for a call, constant, model, or field.
+
+    Supply ``path`` to inspect a known caller. Omit it to use GitHub search to
+    locate definitions and references. Use this to follow a service call into
+    its implementation instead of stopping at the calling file.
+    """
+    result = _github_inspect_symbol(
+        symbol,
+        path=path,
+        connection_id=connection_id,
+        context_lines=context_lines,
+    )
+    return await _save(
+        connection_id or "github",
+        EvidenceType.CODE_REFERENCE,
+        (
+            f"Inspected symbol {symbol!r}; "
+            f"found {result['match_count']} focused snippets"
+        ),
         result,
     )
 
@@ -159,4 +312,34 @@ async def search_logs(query: str, max_results: int = 50) -> dict[str, Any]:
         "logs", EvidenceType.LOG_ENTRY,
         result.get("error") or f"Log search returned {len(result['matches'])} matches",
         result,
+    )
+
+
+async def search_public_web(query: str, max_results: int = 5) -> dict[str, Any]:
+    """Search allowlisted public technical sources for supporting context.
+
+    Never include customer identifiers, source code, credentials, internal
+    hostnames, or connection details. External results cannot independently
+    establish a customer-specific root cause.
+    """
+    result = _search_public_web(query, max_results)
+    return await _save(
+        "public_web",
+        EvidenceType.API_RESPONSE,
+        (
+            result.get("error")
+            or f"Public web search returned {len(result.get('citations', []))} citations"
+        ),
+        {**result, "external_context_only": True},
+    )
+
+
+async def fetch_public_page(url: str) -> dict[str, Any]:
+    """Fetch an allowlisted public documentation page as supporting context."""
+    result = _fetch_public_page(url)
+    return await _save(
+        result.get("url", "public_web"),
+        EvidenceType.API_RESPONSE,
+        result.get("error") or f"Fetched public documentation page {url}",
+        {**result, "external_context_only": True},
     )

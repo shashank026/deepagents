@@ -11,3 +11,6 @@ class RootCauseAnalysis(BaseModel):
     is_established: bool = False
     missing_information: list[str] = Field(default_factory=list)
     suggested_actions: list[str] = Field(default_factory=list)
+    contributing_factors: list[str] = Field(default_factory=list)
+    recommended_fix: list[str] = Field(default_factory=list)
+    validation_steps: list[str] = Field(default_factory=list)

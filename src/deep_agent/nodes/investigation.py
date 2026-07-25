@@ -1,14 +1,13 @@
 import json
-import os
 import re
-from functools import lru_cache
-
-from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from deep_agent.models.investigation import InvestigationResult
 from deep_agent.models.state import InvestigationState
-from deep_agent.services.model_retry import invoke_with_rate_limit_retry
+from deep_agent.services.evidence_context import compact_evidence
+from deep_agent.services.reasoning import reasoning_call_limit, reasoning_service
+from deep_agent.stage_prompts import (
+    INVESTIGATION_PROMPT as STAGE_INVESTIGATION_PROMPT,
+)
 from deep_agent.services.retrieval_verification import final_answer_evidence
 
 MAX_COLLECTION_ATTEMPTS = 3
@@ -126,6 +125,12 @@ Confidence:
 
 Correlation does not imply causation.
 
+An exact customer-reported system error may establish the rejected business
+condition when it is corroborated by matching database, code, API, or log
+evidence. Do not discard an explicit entitlement or validation error merely
+because runtime logs are unavailable. Clearly distinguish the reported message
+from independently verified supporting state.
+
 ====================================================================
 MISSING EVIDENCE
 ====================================================================
@@ -187,22 +192,22 @@ An unsupported conclusion.
 """
 
 
-@lru_cache(maxsize=1)
-def _model():
-    load_dotenv()
-    return ChatGoogleGenerativeAI(
-        model=os.getenv("INVESTIGATION_MODEL", "gemini-3.1-flash-lite"), temperature=0
-    ).with_structured_output(InvestigationResult)
-
-
 async def investigate_node(state: InvestigationState) -> dict:
-    payload = [item.model_dump(mode="json") for item in state.get("evidence", [])]
+    reasoning_calls = state.get("reasoning_calls", 0)
+    if reasoning_calls >= reasoning_call_limit():
+        return {
+            "investigation": None,
+            "failure_reason": "Investigation reasoning budget was exhausted.",
+            "current_stage": "investigation_failed",
+        }
+    payload = compact_evidence(state.get("evidence", []))
     try:
-        result = await invoke_with_rate_limit_retry(
-            lambda: _model().ainvoke([
-                {"role": "system", "content": INVESTIGATION_PROMPT},
+        result = await reasoning_service().invoke(
+            InvestigationResult,
+            [
+                {"role": "system", "content": STAGE_INVESTIGATION_PROMPT},
                 {"role": "user", "content": f"Issue:\n{state['user_query']}\n\nEvidence:\n{json.dumps(payload, indent=2)}"},
-            ]),
+            ],
             stage="Investigation",
         )
     except Exception as exc:
@@ -210,12 +215,33 @@ async def investigate_node(state: InvestigationState) -> dict:
             "investigation": None,
             "failure_reason": f"Investigation model error: {exc}",
             "current_stage": "investigation_failed",
+            "reasoning_calls": reasoning_calls + 1,
         }
     valid_ids = {item.id for item in state.get("evidence", [])}
     for hypothesis in result.hypotheses:
         hypothesis.supporting_evidence_ids = [x for x in hypothesis.supporting_evidence_ids if x in valid_ids]
         hypothesis.contradicting_evidence_ids = [x for x in hypothesis.contradicting_evidence_ids if x in valid_ids]
+    # Do not allow executable validation work to leak into the final report as
+    # an unperformed suggestion. Turn unresolved questions and hypothesis
+    # validation steps into a targeted evidence-collection request while the
+    # workflow still has collection attempts available.
+    if not result.requested_evidence:
+        follow_ups = [
+            *result.unresolved_questions,
+            *[
+                step
+                for hypothesis in result.hypotheses
+                if hypothesis.status != "contradicted"
+                for step in hypothesis.validation_steps
+            ],
+        ]
+        result.requested_evidence = list(dict.fromkeys(
+            item.strip() for item in follow_ups if item.strip()
+        ))[:3]
+    if result.requested_evidence:
+        result.requires_more_evidence = True
     return {"investigation": result, "requested_evidence": result.requested_evidence,
+            "reasoning_calls": reasoning_calls + 1,
             "current_stage": "root_cause_analysis"}
 
 
@@ -223,6 +249,11 @@ def route_after_investigation(state: InvestigationState) -> str:
     result = state.get("investigation")
     if result is None:
         return "build_inconclusive_report"
+    understanding = state.get("query_understanding")
+    is_incident = bool(
+        understanding
+        and understanding.intent == "incident_investigation"
+    )
     if _is_completed_data_retrieval(state):
         return "build_result_report"
     if _looks_like_data_retrieval(state):
@@ -232,6 +263,12 @@ def route_after_investigation(state: InvestigationState) -> str:
     if (result.requires_more_evidence and result.requested_evidence
             and state.get("evidence_collection_attempts", 0) < MAX_COLLECTION_ATTEMPTS):
         return "collect_more_evidence"
+    if not is_incident:
+        return (
+            "build_inconclusive_report"
+            if result.requires_more_evidence or result.unresolved_questions
+            else "build_result_report"
+        )
     return "identify_root_cause"
 
 
@@ -261,6 +298,9 @@ def _is_completed_data_retrieval(state: InvestigationState) -> bool:
 
 
 def _looks_like_data_retrieval(state: InvestigationState) -> bool:
+    understanding = state.get("query_understanding")
+    if understanding is not None:
+        return understanding.intent in {"data_retrieval", "informational"}
     query = state.get("user_query", "").strip().lower()
     retrieval = bool(re.match(
         r"^(give|show|list|get|return|fetch|identify|find|which|what|who)\b",
