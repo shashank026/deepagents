@@ -1,13 +1,12 @@
 import json
-import os
-from functools import lru_cache
-
-from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from deep_agent.models.root_cause import RootCauseAnalysis
 from deep_agent.models.state import InvestigationState
-from deep_agent.services.model_retry import invoke_with_rate_limit_retry
+from deep_agent.services.evidence_context import compact_evidence
+from deep_agent.services.reasoning import reasoning_call_limit, reasoning_service
+from deep_agent.stage_prompts import (
+    ROOT_CAUSE_PROMPT as STAGE_ROOT_CAUSE_PROMPT,
+)
 
 ROOT_CAUSE_PROMPT = """
 You are TraceX's Principal Root Cause Analysis Agent.
@@ -39,6 +38,12 @@ A root cause exists only if all are true:
 3. Contradictions are addressed.
 4. Causal mechanism is identified.
 5. Alternative hypotheses are rejected.
+
+For deterministic validation or entitlement failures, an exact
+customer-reported system error can establish the rejected condition when at
+least one independent source confirms the matching account, project,
+subscription, plan, feature gate, or code path. Runtime reproduction is not
+mandatory in that case. Never treat customer text alone as sufficient proof.
 
 If any condition is false:
 
@@ -134,29 +139,47 @@ When evidence is insufficient, prefer:
 "Root cause could not be established."
 
 over any speculative explanation.
+
+Suggested actions are allowed only for work that could not be performed with
+the connected tools because a source, permission, or required datum was
+unavailable. Never list an action as suggested if the evidence shows it was
+already completed, and never imply that a suggested action was performed.
 """
 
 
-@lru_cache(maxsize=1)
-def _model():
-    load_dotenv()
-    return ChatGoogleGenerativeAI(
-        model=os.getenv("ROOT_CAUSE_MODEL", "gemini-3.1-flash-lite"), temperature=0
-    ).with_structured_output(RootCauseAnalysis)
-
-
 async def identify_root_cause_node(state: InvestigationState) -> dict:
-    evidence = [item.model_dump(mode="json") for item in state.get("evidence", [])]
+    reasoning_calls = state.get("reasoning_calls", 0)
+    if reasoning_calls >= reasoning_call_limit():
+        return {
+            "root_cause_analysis": None,
+            "failure_reason": "Root-cause reasoning budget was exhausted.",
+            "current_stage": "root_cause_failed",
+        }
+    investigation = state["investigation"]
+    referenced_ids = {
+        evidence_id
+        for hypothesis in investigation.hypotheses
+        for evidence_id in (
+            hypothesis.supporting_evidence_ids
+            + hypothesis.contradicting_evidence_ids
+        )
+    }
+    evidence = compact_evidence(
+        state.get("evidence", []),
+        max_items=18,
+        referenced_ids=referenced_ids,
+    )
     try:
-        result = await invoke_with_rate_limit_retry(
-            lambda: _model().ainvoke([
-                {"role": "system", "content": ROOT_CAUSE_PROMPT},
+        result = await reasoning_service().invoke(
+            RootCauseAnalysis,
+            [
+                {"role": "system", "content": STAGE_ROOT_CAUSE_PROMPT},
                 {"role": "user", "content": json.dumps({
                     "issue": state["user_query"],
-                    "investigation": state["investigation"].model_dump(mode="json"),
+                    "investigation": investigation.model_dump(mode="json"),
                     "evidence": evidence,
                 }, indent=2)},
-            ]),
+            ],
             stage="Root-cause analysis",
         )
     except Exception as exc:
@@ -164,5 +187,10 @@ async def identify_root_cause_node(state: InvestigationState) -> dict:
             "root_cause_analysis": None,
             "failure_reason": f"Root-cause model error: {exc}",
             "current_stage": "root_cause_failed",
+            "reasoning_calls": reasoning_calls + 1,
         }
-    return {"root_cause_analysis": result, "current_stage": "root_cause_validation"}
+    return {
+        "root_cause_analysis": result,
+        "current_stage": "root_cause_validation",
+        "reasoning_calls": reasoning_calls + 1,
+    }

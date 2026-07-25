@@ -348,6 +348,16 @@ def _coerce_mongodb_ids(value: Any, key: str = "") -> Any:
         }
     if isinstance(value, list):
         return [_coerce_mongodb_ids(item, key) for item in value]
+    normalized_key = key.lower().replace("_", "")
+    if (
+        isinstance(value, float)
+        and normalized_key.endswith("id")
+        and abs(value) >= 1_000_000_000_000_000
+    ):
+        raise ValueError(
+            f"MongoDB identifier {key!r} must be passed as an exact string; "
+            "floating-point/scientific notation would corrupt the value"
+        )
     if (
         isinstance(value, str)
         and (key == "_id" or key.endswith("_id"))

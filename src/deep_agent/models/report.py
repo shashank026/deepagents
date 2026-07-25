@@ -8,7 +8,13 @@ class ResultRecord(BaseModel):
     record: dict[str, Any] = Field(default_factory=dict)
 
 
+class ExternalReference(BaseModel):
+    title: str
+    url: str
+
+
 class RootCauseReport(BaseModel):
+    investigation_status: str = "insufficient_evidence"
     response_type: str = "analysis"
     verification_status: str = "inconclusive"
     issue_summary: str = ""
@@ -24,3 +30,11 @@ class RootCauseReport(BaseModel):
     customer_response: str = ""
     engineering_note: str = ""
     result_records: list[ResultRecord] = Field(default_factory=list)
+    impact: str = ""
+    investigation_steps: list[str] = Field(default_factory=list)
+    rejected_hypotheses: list[str] = Field(default_factory=list)
+    contributing_factors: list[str] = Field(default_factory=list)
+    recommended_fix: list[str] = Field(default_factory=list)
+    validation_steps: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    external_references: list[ExternalReference] = Field(default_factory=list)

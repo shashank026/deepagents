@@ -61,17 +61,6 @@ def _tokens(text: str) -> set[str]:
             expanded.add(token[:-3] + "y")
         if token.endswith("s") and len(token) > 3:
             expanded.add(token[:-1])
-    synonyms = {
-        "booking": {"order", "reservation"},
-        "bookings": {"order", "reservation"},
-        "payment": {"transaction"},
-        "payments": {"transaction"},
-        "successful": {"success", "status"},
-        "failed": {"failure", "status"},
-        "customer": {"client", "user"},
-    }
-    for token in tokens:
-        expanded.update(synonyms.get(token, set()))
     return {token for token in expanded if len(token) > 1}
 
 
