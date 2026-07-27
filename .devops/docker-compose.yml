@@ -1,5 +1,3 @@
-name: tracex-deepagents
-
 services:
   deepagents:
     container_name: tracex-deepagents
@@ -33,4 +31,3 @@ networks:
   tracex:
     external: true
     name: tracex-network
-
