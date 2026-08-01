@@ -2,6 +2,7 @@ from deep_agent.models.query import EvidenceSource, EvidenceSourcePlan
 from deep_agent.models.execution import InvestigationPlanStep
 from deep_agent.models.state import InvestigationState
 from deep_agent.tools.web_research import web_research_enabled
+from deep_agent.tools.external_sources import log_source_status
 
 
 def plan_evidence_sources_node(state: InvestigationState) -> dict:
@@ -24,6 +25,8 @@ def plan_evidence_sources_node(state: InvestigationState) -> dict:
     }
     explicit_code = any(term in query for term in code_terms)
     explicit_logs = any(term in query for term in {"logs", "log entries", "search logs", "show logs"})
+    logs = log_source_status()
+    has_logs = bool(logs["available"])
     incident = understanding.intent == "incident_investigation"
     has_concrete_identifiers = any(
         entity.value is not None for entity in understanding.entities
@@ -66,7 +69,8 @@ def plan_evidence_sources_node(state: InvestigationState) -> dict:
         )
 
     log_terms = {"error", "exception", "timeout", "incident", "timeline", "logs", "runtime"}
-    if incident or explicit_logs or any(term in query for term in log_terms):
+    logs_relevant = incident or explicit_logs or any(term in query for term in log_terms)
+    if logs_relevant and has_logs:
         sources.append(EvidenceSource.LOGS)
         reasons[EvidenceSource.LOGS] = "Verify runtime events, failures, and event chronology."
 
@@ -87,6 +91,7 @@ def plan_evidence_sources_node(state: InvestigationState) -> dict:
     sources = list(dict.fromkeys(sources))
     optional_sources: list[EvidenceSource] = []
     escalation_reasons: dict[EvidenceSource, list[str]] = {}
+    unavailable_sources: dict[EvidenceSource, str] = {}
     if has_codebase and EvidenceSource.CODEBASE not in sources:
         optional_sources.append(EvidenceSource.CODEBASE)
         escalation_reasons[EvidenceSource.CODEBASE] = [
@@ -94,11 +99,13 @@ def plan_evidence_sources_node(state: InvestigationState) -> dict:
             "Database or runtime evidence contradicts expected behavior.",
             "The implementing decision path is required to explain root cause.",
         ]
-    if EvidenceSource.LOGS not in sources and incident:
+    if EvidenceSource.LOGS not in sources and incident and has_logs:
         optional_sources.append(EvidenceSource.LOGS)
         escalation_reasons[EvidenceSource.LOGS] = [
             "A runtime chronology or error event is required to test a hypothesis."
         ]
+    if logs_relevant and not has_logs:
+        unavailable_sources[EvidenceSource.LOGS] = str(logs["reason"])
     if (
         web_research_enabled()
         and EvidenceSource.WEB not in sources
@@ -115,6 +122,7 @@ def plan_evidence_sources_node(state: InvestigationState) -> dict:
         reasons=reasons,
         optional_sources=optional_sources,
         escalation_reasons=escalation_reasons,
+        unavailable_sources=unavailable_sources,
     )
     investigation_plan = []
     if EvidenceSource.CODEBASE in sources:

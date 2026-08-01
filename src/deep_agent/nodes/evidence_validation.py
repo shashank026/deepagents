@@ -10,12 +10,20 @@ def validate_evidence_node(state: InvestigationState) -> dict:
         if item.id and item.source and item.summary and isinstance(item.content, dict)
     ]
     unique = {item.id: item for item in valid}
-    if not unique:
+    substantive = [
+        item for item in unique.values()
+        if item.evidence_type != EvidenceType.USER_INPUT
+    ]
+    if not unique or (
+        state.get("evidence_source_plan")
+        and state["evidence_source_plan"].sources
+        and not substantive
+    ):
         errors = state.get("evidence_collection_errors", [])
         reason = "No valid evidence was collected."
         if errors:
             reason = f"{reason} Evidence collection error: {errors[-1]}"
-        return {"evidence": [], "failure_reason": reason,
+        return {"evidence": list(unique.values()), "failure_reason": reason,
                 "current_stage": "evidence_insufficient"}
     evidence = list(unique.values())
     plan = [

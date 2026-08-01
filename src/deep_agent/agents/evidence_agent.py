@@ -25,6 +25,7 @@ from deep_agent.tools.evidence_tools import (
     fetch_public_page,
 )
 from deep_agent.tools.web_research import web_research_enabled
+from deep_agent.tools.external_sources import log_source_status, SourceUnavailableError
 
 
 EVIDENCE_AGENT_PROMPT = """
@@ -342,6 +343,8 @@ def create_evidence_agent(sources: set[EvidenceSource] | None = None):
     load_dotenv()
     model = os.getenv("EVIDENCE_MODEL", "google_genai:gemini-2.5-pro")
     selected = sources or {EvidenceSource.DATABASE}
+    if EvidenceSource.LOGS in selected and not log_source_status()["available"]:
+        raise SourceUnavailableError(log_source_status()["reason"])
     tools = []
     source_instructions = []
     if EvidenceSource.DATABASE in selected:

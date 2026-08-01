@@ -8,6 +8,34 @@ LOG_SUFFIXES = {".log", ".txt", ".json", ".jsonl"}
 SKIP_DIRECTORIES = {".git", ".venv", "node_modules", "dist", "build", "__pycache__"}
 
 
+class SourceUnavailableError(RuntimeError):
+    pass
+
+
+def log_source_status() -> dict[str, Any]:
+    """Return the actual local-log capability; relevance never implies access."""
+    configured = os.getenv("LOG_ROOT", "").strip()
+    if not configured:
+        return {
+            "available": False,
+            "provider": None,
+            "reason": "No logs source is connected and LOG_ROOT is not configured.",
+        }
+    root = Path(configured).resolve()
+    if not root.exists() or not root.is_dir():
+        return {
+            "available": False,
+            "provider": "local_filesystem",
+            "reason": "The configured LOG_ROOT directory is unavailable.",
+        }
+    return {
+        "available": True,
+        "provider": "local_filesystem",
+        "root": str(root),
+        "reason": None,
+    }
+
+
 def _search_files(root: Path, query: str, suffixes: set[str], max_results: int) -> dict[str, Any]:
     if not root.exists() or not root.is_dir():
         return {"query": query, "root": str(root), "matches": [], "unavailable": True,
@@ -51,9 +79,9 @@ def search_codebase_files(query: str, max_results: int = 30) -> dict[str, Any]:
 
 
 def search_log_files(query: str, max_results: int = 50) -> dict[str, Any]:
-    configured = os.getenv("LOG_ROOT")
-    if not configured:
+    status = log_source_status()
+    if not status["available"]:
         return {"query": query, "matches": [], "unavailable": True,
-                "error": "LOG_ROOT is not configured"}
-    root = Path(configured).resolve()
+                "error": status["reason"]}
+    root = Path(status["root"])
     return _search_files(root, query, LOG_SUFFIXES, min(max(1, max_results), 100))

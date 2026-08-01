@@ -112,6 +112,15 @@ from an expired worker. Independent planned sources are collected concurrently
 by bounded source-specific workers, while the parent LangGraph remains the only
 orchestrator and deterministic validator.
 
+Source relevance and source availability are separate decisions. In
+particular, incident intent does not create a logs capability. Logs are planned
+and the `search_logs` tool is exposed only when `LOG_ROOT` resolves to an
+existing authorized directory (or a future connected logs adapter reports an
+equivalent capability). Helpful but unavailable sources are recorded once in
+the source plan. Permanent configuration, authentication, authorization, and
+source-unavailable failures are not retried; independent successful workers
+continue and the final report identifies the unavailable evidence.
+
 Sandboxed code execution is intentionally not part of this rollout. Future
 sandbox workers must be isolated, network-denied by default, and must never
 receive production database credentials.

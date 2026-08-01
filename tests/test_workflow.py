@@ -49,6 +49,7 @@ from deep_agent.tools.tools import retrieve_schema_context
 from deep_agent.services.skills import select_skills
 from deep_agent.services.checkpointing import checkpoint_provider
 from deep_agent.models.query import EvidenceSourcePlan
+from deep_agent.tools.external_sources import SourceUnavailableError
 
 
 def evidence():
@@ -1523,9 +1524,10 @@ def test_verifier_is_domain_agnostic_for_new_entity_types():
 
 
 def test_source_planner_starts_incident_with_runtime_sources_and_optional_code(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ):
     monkeypatch.setenv("WEB_RESEARCH_ENABLED", "true")
+    monkeypatch.setenv("LOG_ROOT", str(tmp_path))
     understanding = extract_business_entities_node({
         "user_query": "Why did bookingid BK-1042 fail with a timeout?"
     })["query_understanding"]
@@ -1621,9 +1623,10 @@ def test_source_planner_supports_codebase_only_lookup():
 
 
 def test_source_planner_combines_logs_and_database_for_concrete_id(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ):
     monkeypatch.setenv("WEB_RESEARCH_ENABLED", "true")
+    monkeypatch.setenv("LOG_ROOT", str(tmp_path))
     query = "Show logs for bookingid BK-9"
     understanding = extract_business_entities_node({"user_query": query})["query_understanding"]
     plan = plan_evidence_sources_node({
@@ -1632,3 +1635,37 @@ def test_source_planner_combines_logs_and_database_for_concrete_id(
     assert set(plan.sources) == {
         EvidenceSource.DATABASE, EvidenceSource.LOGS,
     }
+
+
+def test_incident_without_connected_logs_never_plans_log_worker(monkeypatch):
+    monkeypatch.delenv("LOG_ROOT", raising=False)
+    query = "Payment failed"
+    understanding = extract_business_entities_node({"user_query": query})["query_understanding"]
+    plan = plan_evidence_sources_node({
+        "user_query": query,
+        "query_understanding": understanding,
+        "database_sources": [{"connection_id": "db-1"}],
+        "codebase_sources": [],
+    })["evidence_source_plan"]
+    assert plan.sources == [EvidenceSource.DATABASE]
+    assert EvidenceSource.LOGS not in plan.optional_sources
+    assert "not configured" in plan.unavailable_sources[EvidenceSource.LOGS]
+
+
+def test_missing_log_root_is_not_reported_as_connected_capability(monkeypatch):
+    monkeypatch.delenv("LOG_ROOT", raising=False)
+    manifest = build_context_manifest_node({
+        "investigation_id": "inv-no-logs",
+        "organization_id": "org-1",
+        "project_id": "project-1",
+        "database_sources": [],
+        "codebase_sources": [],
+    })["context_manifest"]
+    assert "logs" in manifest["unavailable_sources"]
+    assert not any(item["source_type"] == "logs" for item in manifest["sources"])
+
+
+def test_log_tool_cannot_be_created_without_log_capability(monkeypatch):
+    monkeypatch.delenv("LOG_ROOT", raising=False)
+    with pytest.raises(SourceUnavailableError, match="not configured"):
+        evidence_agent.create_evidence_agent({EvidenceSource.LOGS})

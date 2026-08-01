@@ -40,6 +40,7 @@ class EvidenceSourcePlan(BaseModel):
     escalation_reasons: dict[EvidenceSource, list[str]] = Field(
         default_factory=dict
     )
+    unavailable_sources: dict[EvidenceSource, str] = Field(default_factory=dict)
 
 
 class TypedQueryFilter(BaseModel):

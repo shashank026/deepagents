@@ -4,6 +4,7 @@ from deep_agent.models.harness import (
     SourceCapability,
 )
 from deep_agent.models.state import InvestigationState
+from deep_agent.tools.external_sources import log_source_status
 
 
 def build_context_manifest_node(state: InvestigationState) -> dict:
@@ -31,6 +32,13 @@ def build_context_manifest_node(state: InvestigationState) -> dict:
                 "file_count": analysis.get("file_count", 0),
             },
         ))
+    logs = log_source_status()
+    if logs["available"]:
+        sources.append(SourceCapability(
+            source_type="logs",
+            source_id="configured-log-source",
+            provider=logs.get("provider"),
+        ))
     manifest = InvestigationContextManifest(
         investigation_id=state["investigation_id"],
         organization_id=state["organization_id"],
@@ -43,6 +51,7 @@ def build_context_manifest_node(state: InvestigationState) -> dict:
             name for name, present in {
                 "database": bool(state.get("database_sources")),
                 "codebase": bool(state.get("codebase_sources")),
+                "logs": bool(logs["available"]),
             }.items() if not present
         ],
     )

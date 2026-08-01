@@ -22,6 +22,15 @@ from deep_agent.services.evidence_context import compact_evidence
 from deep_agent.services.skills import select_skills
 
 
+def _permanent_source_error(error: BaseException | str) -> bool:
+    message = str(error).lower()
+    return any(term in message for term in (
+        "not configured", "not connected", "unavailable", "permission",
+        "authentication", "authorization", "invalid credential",
+        "unknown project database connection", "no analyzed codebase",
+    ))
+
+
 async def collect_evidence_node(
     state: InvestigationState, config: RunnableConfig | None = None
 ) -> dict:
@@ -144,13 +153,36 @@ async def collect_evidence_node(
             return_exceptions=True,
         )
         failures = [result for result in results if isinstance(result, Exception)]
+        failed_sources = {
+            next(iter(group)): result
+            for group, result in zip(selected_groups, results)
+            if group and isinstance(result, Exception)
+        }
         if failures and len(failures) == len(results):
             raise failures[0]
         evidence = await evidence_repository.list_by_investigation(investigation_id)
+        failure_messages = list(dict.fromkeys(
+            f"{type(item).__name__}: {item}" for item in failures
+        ))
+        updated_plan = source_plan
+        permanent = {
+            source: error for source, error in failed_sources.items()
+            if _permanent_source_error(error)
+        }
+        if source_plan and permanent:
+            unavailable = dict(source_plan.unavailable_sources)
+            unavailable.update({source: str(error) for source, error in permanent.items()})
+            updated_plan = source_plan.model_copy(update={
+                "sources": [
+                    source for source in source_plan.sources if source not in permanent
+                ],
+                "unavailable_sources": unavailable,
+            })
         return {
             "evidence": evidence,
             "evidence_collection_attempts": state.get("evidence_collection_attempts", 0) + 1,
-            "evidence_collection_errors": [str(item) for item in failures],
+            "evidence_collection_errors": failure_messages,
+            "evidence_source_plan": updated_plan,
             "requested_evidence": [],
             "current_stage": "evidence_validation",
         }
@@ -161,6 +193,8 @@ async def collect_evidence_node(
         # The node already honored RetryInfo internally. Do not let the graph's
         # evidence loop multiply a persistent quota failure into nine attempts.
         if is_rate_limit_error(exc):
+            attempts = 3
+        if _permanent_source_error(exc):
             attempts = 3
         return {
             "evidence": evidence,
