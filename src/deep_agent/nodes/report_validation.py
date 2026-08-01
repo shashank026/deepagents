@@ -1,6 +1,21 @@
 import re
 
 from deep_agent.models.state import InvestigationState
+from deep_agent.nodes.root_cause_validation import is_causal_support
+
+
+_INCONCLUSIVE_CUSTOMER_RESPONSE = """Subject: TraceX investigation update
+
+Hello,
+
+We reviewed the available evidence, but it is not sufficient to confirm a reliable root cause at this time. No corrective action should be taken from exploratory searches alone.
+
+No customer data was modified during this investigation.
+
+If you need any additional validation or assistance, please reply to this message and our support team will be happy to help.
+
+Regards,
+TraceX L2 Support Team"""
 
 
 def validate_report_node(state: InvestigationState) -> dict:
@@ -13,6 +28,7 @@ def validate_report_node(state: InvestigationState) -> dict:
         }
 
     valid_ids = {item.id for item in state.get("evidence", [])}
+    evidence_by_id = {item.id: item for item in state.get("evidence", [])}
     errors: list[str] = []
     understanding = state.get("query_understanding")
     is_incident = bool(
@@ -25,12 +41,31 @@ def validate_report_node(state: InvestigationState) -> dict:
     report.contradicting_evidence_ids = [
         item for item in report.contradicting_evidence_ids if item in valid_ids
     ]
-    if report.root_cause and not report.supporting_evidence_ids:
-        errors.append("Root cause had no valid supporting evidence IDs.")
+    analysis = state.get("root_cause_analysis")
+    has_causal_support = any(
+        is_causal_support(evidence_by_id[evidence_id])
+        for evidence_id in report.supporting_evidence_ids
+    )
+    valid_analysis = bool(analysis and analysis.is_established)
+    if report.root_cause and (not has_causal_support or not valid_analysis):
+        errors.append(
+            "Root cause did not have a validated causal analysis and causal evidence."
+        )
         report.root_cause = None
         report.confidence = 0.0
         report.verification_status = "inconclusive"
         report.investigation_status = "insufficient_evidence"
+        report.supporting_evidence_ids = []
+        report.suggested_actions = []
+        report.recommended_fix = []
+        report.validation_steps = []
+        report.contributing_factors = []
+        report.customer_response = _INCONCLUSIVE_CUSTOMER_RESPONSE
+        report.engineering_note = (
+            "Root cause was withheld because the report was not backed by a "
+            "validated causal analysis and causal evidence. Exploratory "
+            "lookups and query corrections are not customer incident causes."
+        )
     if not is_incident and report.root_cause:
         errors.append(
             "Root cause was removed because the request was not an incident."

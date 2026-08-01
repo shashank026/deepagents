@@ -138,6 +138,15 @@ Incident evidence collection follows a code-to-runtime causal path:
 6. Compare stored state with the authoritative status or feature mapping.
 7. Persist the causal chain and reject alternatives before RCA.
 
+Database evidence has an explicit role. Schema discovery, entity resolution,
+fallback scans, empty lookups, rejected queries, and query corrections are
+`exploration`; they describe TraceX's investigation and cannot establish what
+caused a customer's operation to fail. A database result may support RCA only
+when it is marked `causal_validation`, was derived from verified schema and
+relationships, directly tests a stated hypothesis, and returns the runtime
+state used by the alleged mechanism. MongoDB filters are recursively validated;
+quoted or unsupported operator keys are rejected before reaching the provider.
+
 Focused symbol evidence retains repository, ref, path, blob SHA, line numbers,
 and bounded source snippets, so decisive logic is not lost when large files are
 compacted.

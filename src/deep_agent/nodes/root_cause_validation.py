@@ -1,4 +1,5 @@
 from deep_agent.models.state import InvestigationState
+from deep_agent.models.evidence import EvidenceType
 
 MIN_ROOT_CAUSE_CONFIDENCE = 0.70
 _UNSAFE_REMEDIATION_MARKERS = (
@@ -29,6 +30,23 @@ def _is_speculative(value: str) -> bool:
     return any(marker in lowered for marker in _SPECULATIVE_MARKERS)
 
 
+def is_causal_support(item) -> bool:
+    """Reject investigation artifacts as proof of customer-facing causality."""
+    if item.content.get("error") or item.content.get("unavailable") is True:
+        return False
+    if item.evidence_type == EvidenceType.DATABASE_QUERY:
+        return (
+            item.content.get("evidence_role") == "causal_validation"
+            and bool(item.content.get("rows"))
+        )
+    return item.evidence_type in {
+        EvidenceType.LOG_ENTRY,
+        EvidenceType.CODE_REFERENCE,
+        EvidenceType.CONFIGURATION,
+        EvidenceType.API_RESPONSE,
+    } and item.content.get("external_context_only") is not True
+
+
 def validate_root_cause_node(state: InvestigationState) -> dict:
     analysis = state.get("root_cause_analysis")
     investigation = state.get("investigation")
@@ -41,9 +59,7 @@ def validate_root_cause_node(state: InvestigationState) -> dict:
     analysis.supporting_evidence_ids = [x for x in analysis.supporting_evidence_ids if x in evidence_ids]
     analysis.contradicting_evidence_ids = [x for x in analysis.contradicting_evidence_ids if x in evidence_ids]
     has_internal_support = any(
-        not evidence_by_id[evidence_id].content.get(
-            "external_context_only", False
-        )
+        is_causal_support(evidence_by_id[evidence_id])
         for evidence_id in analysis.supporting_evidence_ids
     )
     established = bool(
@@ -75,6 +91,12 @@ def validate_root_cause_node(state: InvestigationState) -> dict:
     if not established:
         analysis.is_established = False
         analysis.root_cause = None
+        analysis.confidence = 0.0
+        analysis.supporting_evidence_ids = []
+        analysis.reasoning_summary = (
+            "Root cause could not be established from causal evidence. "
+            "Exploratory searches and query corrections were excluded."
+        )
         # Never recommend mutations or remediation when causality is not
         # established. Remaining items must describe missing evidence only.
         analysis.suggested_actions = []

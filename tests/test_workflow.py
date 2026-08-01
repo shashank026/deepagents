@@ -244,10 +244,14 @@ def test_root_cause_rejects_hallucinated_references():
                                        "root_cause_analysis": analysis})
     assert update["root_cause_analysis"].is_established is False
     assert update["root_cause_analysis"].root_cause is None
+    assert update["root_cause_analysis"].supporting_evidence_ids == []
+    assert update["root_cause_analysis"].confidence == 0.0
     assert update["root_cause_analysis"].suggested_actions == []
 
 
 def test_root_cause_removes_direct_data_mutation_and_speculation():
+    causal_evidence = evidence().model_copy(deep=True)
+    causal_evidence.content["evidence_role"] = "causal_validation"
     analysis = RootCauseAnalysis(
         root_cause="The verified feature predicate rejected the operation.",
         confidence=.9,
@@ -264,7 +268,7 @@ def test_root_cause_removes_direct_data_mutation_and_speculation():
         ],
     )
     update = validate_root_cause_node({
-        "evidence": [evidence()],
+        "evidence": [causal_evidence],
         "investigation": investigation(),
         "root_cause_analysis": analysis,
     })
@@ -276,6 +280,43 @@ def test_root_cause_removes_direct_data_mutation_and_speculation():
     assert validated.contributing_factors == [
         "The billing event is confirmed to be missing."
     ]
+
+
+def test_exploratory_lookup_cannot_become_customer_root_cause():
+    exploratory = Evidence(
+        id="ev-lookup",
+        evidence_type=EvidenceType.DATABASE_QUERY,
+        source="organisations",
+        summary="Exploratory organization lookup returned no rows",
+        content={
+            "evidence_role": "exploration",
+            "filter": {"name": "bigbrosai"},
+            "rows": [],
+            "row_count": 0,
+            "error": None,
+        },
+    )
+    result = investigation()
+    result.hypotheses[0].supporting_evidence_ids = ["ev-lookup"]
+    analysis = RootCauseAnalysis(
+        root_cause=(
+            "The operation was rejected because TraceX's case-sensitive "
+            "organization lookup returned no rows."
+        ),
+        confidence=.95,
+        is_established=True,
+        selected_hypothesis_id="h-1",
+        supporting_evidence_ids=["ev-lookup"],
+    )
+    update = validate_root_cause_node({
+        "evidence": [exploratory],
+        "investigation": result,
+        "root_cause_analysis": analysis,
+    })
+    assert update["root_cause_analysis"].is_established is False
+    assert update["root_cause_analysis"].root_cause is None
+    assert update["root_cause_analysis"].supporting_evidence_ids == []
+    assert update["root_cause_analysis"].confidence == 0.0
 
 
 def test_external_web_evidence_cannot_independently_establish_root_cause():
@@ -623,6 +664,47 @@ def test_report_validator_rejects_root_cause_without_evidence():
     })
     assert update["final_report"].root_cause is None
     assert update["insufficient_evidence"] is True
+    assert "Unsupported cause" not in update["final_report"].customer_response
+    assert "reliable root cause" in update["final_report"].customer_response
+
+
+def test_report_validator_rejects_exploration_as_customer_rca():
+    exploratory = Evidence(
+        id="ev-lookup",
+        evidence_type=EvidenceType.DATABASE_QUERY,
+        source="organisations",
+        summary="Case-sensitive exploration returned no rows",
+        content={
+            "evidence_role": "exploration",
+            "rows": [],
+            "row_count": 0,
+            "error": None,
+        },
+    )
+    analysis = RootCauseAnalysis(
+        root_cause="TraceX's lowercase lookup caused the payment failure.",
+        confidence=.95,
+        is_established=True,
+        supporting_evidence_ids=["ev-lookup"],
+        recommended_fix=["Change the customer application search."],
+    )
+    report = build_final_report_node({
+        "user_query": "Why did payment fail?",
+        "evidence": [exploratory],
+        "investigation": investigation(),
+        "root_cause_analysis": analysis,
+    })["final_report"]
+    update = validate_report_node({
+        "evidence": [exploratory],
+        "root_cause_analysis": analysis,
+        "final_report": report,
+    })
+    validated = update["final_report"]
+    assert validated.root_cause is None
+    assert validated.recommended_fix == []
+    assert "lowercase lookup" not in validated.customer_response
+    assert "lowercase lookup" not in validated.engineering_note
+    assert validated.verification_status == "inconclusive"
 
 
 def test_entitlement_causal_chain_produces_actionable_l2_report():
@@ -1272,6 +1354,15 @@ def test_mongodb_validation_rejects_write_and_server_code_stages():
             pass
         else:
             raise AssertionError("unsafe MongoDB operation accepted")
+
+
+def test_mongodb_validation_rejects_quoted_operator_keys():
+    with pytest.raises(ValueError, match="Malformed quoted MongoDB operator"):
+        _validate_mongodb_value({
+            "organisationId": {
+                "'$eq'": {"'$oid'": "695653deffb2f9d2eccdd6d1"}
+            }
+        })
 
 
 def test_client_queries_reject_tracex_control_plane_ids():

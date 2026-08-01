@@ -228,7 +228,12 @@ Never answer from:
 Every database query must declare its purpose:
 
 - purpose="exploration" for schema/value discovery.
+- purpose="causal_validation" only for a verified query that directly tests a
+  stated incident hypothesis and returns the state used by its mechanism.
 - purpose="final_answer" only for the single conclusive query.
+
+An exploration query, empty lookup, rejected query, or corrected query is an
+investigation artifact. It cannot establish a customer-facing root cause.
 
 The final_answer query must return the exact requested entity, decisive metric,
 units/status when relevant, and expected row count in one proof record. Prefer
@@ -387,6 +392,10 @@ def create_evidence_agent(sources: set[EvidenceSource] | None = None):
             "in the system prompt. Prefer execute_typed_database_query so field names "
             "and MongoDB BSON types are validated deterministically. Use a raw provider "
             "query only when the typed operations cannot express a required aggregation. "
+            "Use purpose='exploration' for discovery, purpose='causal_validation' "
+            "only for a query designed to test a stated incident hypothesis, and "
+            "purpose='final_answer' for customer-requested result rows. A failed or "
+            "empty exploratory lookup is never evidence of the customer's root cause. "
             "Return a final proof record, not an exploratory sample."
         )
     if EvidenceSource.CODEBASE in selected:

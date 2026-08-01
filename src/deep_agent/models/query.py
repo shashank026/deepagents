@@ -68,4 +68,6 @@ class TypedQueryIntent(BaseModel):
     sort: list[TypedQuerySort] = Field(default_factory=list)
     distinct_field: str | None = None
     limit: int = Field(default=100, ge=1, le=100)
-    purpose: Literal["exploration", "final_answer"] = "exploration"
+    purpose: Literal[
+        "exploration", "causal_validation", "final_answer"
+    ] = "exploration"

@@ -37,6 +37,12 @@ Database behavior:
 - For unknown semantic values, inspect code mappings and representative values.
 - MongoDB uses native filters/pipelines; relational providers use read-only SQL.
 - An empty result from a guessed field/value is a failed assumption, not proof.
+- Mark schema/value discovery and entity lookups purpose="exploration". These
+  operations describe the investigation and can never prove why the customer's
+  application operation failed.
+- Mark a query purpose="causal_validation" only when its filters were derived
+  from verified schema/relationships and it directly tests a stated incident
+  hypothesis. It must return the state used by the alleged causal mechanism.
 - Final retrieval queries must be explicitly marked purpose="final_answer".
 
 Public-web behavior:
@@ -93,6 +99,8 @@ information when code proves the relationship is stored on another object.
 An exact user-reported error can establish only what was observed. A causal
 conclusion still requires independent database, code, API, or log evidence that
 corroborates the relevant current state and mechanism.
+Never promote TraceX's own failed search, guessed filter, case mismatch, empty
+exploratory lookup, or query correction into a customer root-cause hypothesis.
 """.strip()
 
 
@@ -104,6 +112,11 @@ mechanism is supported, contradictions are addressed, and alternative
 hypotheses are rejected. For deterministic validation failures, reported error
 text plus independent matching state, API, code, or log evidence may establish
 causality.
+
+Database query evidence supports root cause only when it is explicitly marked
+purpose="causal_validation" and returns the state used by the causal mechanism.
+Exploratory queries—including failed lookups and corrected filters—are
+investigation artifacts, not events in the customer's application.
 
 Write the root cause as a precise state-plus-mechanism statement:
 "The operation was rejected because [selected runtime state] caused

@@ -257,7 +257,9 @@ async def execute_typed_database_query(intent: TypedQueryIntent) -> dict[str, An
 async def run_safe_read_query(
     query: str,
     connection_id: str | None = None,
-    purpose: Literal["exploration", "final_answer"] = "exploration",
+    purpose: Literal[
+        "exploration", "causal_validation", "final_answer"
+    ] = "exploration",
 ) -> dict[str, Any]:
     """Execute one validated read-only query, capped at 100 rows and 15 seconds."""
     try:
@@ -293,7 +295,9 @@ async def run_safe_mongodb_query(
     limit: int = 100,
     pipeline: list[dict[str, Any]] | None = None,
     connection_id: str | None = None,
-    purpose: Literal["exploration", "final_answer"] = "exploration",
+    purpose: Literal[
+        "exploration", "causal_validation", "final_answer"
+    ] = "exploration",
 ) -> dict[str, Any]:
     """Execute a read-only MongoDB find or aggregation, capped at 100 documents."""
     try:

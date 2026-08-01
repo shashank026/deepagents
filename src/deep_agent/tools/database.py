@@ -17,6 +17,19 @@ FORBIDDEN_SQL = {
 READ_ONLY_PREFIXES = ("SELECT", "SHOW", "EXPLAIN", "WITH")
 FORBIDDEN_MONGO_STAGES = {"$out", "$merge"}
 FORBIDDEN_MONGO_OPERATORS = {"$where", "$function", "$accumulator"}
+ALLOWED_MONGO_OPERATORS = {
+    "$and", "$or", "$nor", "$not", "$eq", "$ne", "$gt", "$gte", "$lt",
+    "$lte", "$in", "$nin", "$exists", "$type", "$regex", "$options",
+    "$elemMatch", "$all", "$size", "$expr", "$literal", "$cond", "$ifNull",
+    "$switch", "$case", "$then", "$else", "$toString", "$toObjectId",
+    "$convert", "$dateFromString", "$match", "$project", "$group", "$sort",
+    "$limit", "$skip", "$unwind", "$lookup", "$count", "$addFields", "$set",
+    "$unset", "$replaceRoot", "$replaceWith", "$facet", "$bucket",
+    "$bucketAuto", "$sortByCount", "$sample", "$sum", "$avg", "$min", "$max",
+    "$first", "$last", "$push", "$addToSet", "$multiply", "$divide", "$subtract",
+    "$add", "$concat", "$concatArrays", "$arrayElemAt", "$filter", "$map",
+    "$oid", "$date", "$numberDecimal", "$numberLong",
+}
 MAX_ROWS = 100
 
 
@@ -258,6 +271,15 @@ def _execute_cursor(cursor: Any, query: str, provider: str) -> dict[str, Any]:
 def _validate_mongodb_value(value: Any) -> None:
     if isinstance(value, dict):
         for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("MongoDB operation keys must be strings")
+            stripped = key.strip("'\"")
+            if "$" in key and (
+                stripped != key or not key.startswith("$")
+            ):
+                raise ValueError(f"Malformed quoted MongoDB operator {key!r}")
+            if key.startswith("$") and key not in ALLOWED_MONGO_OPERATORS:
+                raise ValueError(f"Unsupported MongoDB operator {key!r}")
             if key in FORBIDDEN_MONGO_STAGES | FORBIDDEN_MONGO_OPERATORS:
                 raise ValueError(f"MongoDB operation {key} is not allowed")
             _validate_mongodb_value(item)
