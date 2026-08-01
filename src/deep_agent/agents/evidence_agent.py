@@ -339,7 +339,7 @@ Persisted evidence is the source of truth.
 
 def create_evidence_agent(sources: set[EvidenceSource] | None = None):
     load_dotenv()
-    model = os.getenv("EVIDENCE_MODEL", "google_genai:gemini-3.1-flash-lite")
+    model = os.getenv("EVIDENCE_MODEL", "google_genai:gemini-2.5-pro")
     selected = sources or {EvidenceSource.DATABASE}
     tools = []
     source_instructions = []
