@@ -69,6 +69,53 @@ intake/extract
 Deterministic Python owns tenant isolation, query validation, retry ceilings,
 evidence-ID validation, failed-assumption tracking, report repair, and routing.
 
+## Expert investigation harness
+
+TraceX starts with the minimum authoritative source set. A connected repository
+is a capability, not a requirement: ordinary record retrieval starts with the
+database, while code is progressively added only when implementation behavior,
+an unresolved mapping, a contradiction, or a causal decision path requires it.
+The source plan records optional sources and their generic escalation reasons.
+
+Every run begins with a secret-free context manifest containing tenant/project
+identity, connected source capabilities, providers, schema/repository versions,
+permissions, and limits. Connection URLs and tokens are never included.
+
+Database agents prefer a provider-neutral `TypedQueryIntent`. Deterministic
+compilers verify objects and fields against analyzed metadata before producing
+MongoDB operations or read-only SQL. MongoDB filters are coerced from analyzed
+BSON types rather than field-name conventions; this handles an `ObjectId` field
+named `objectType`, for example. Mixed analyzed types cause an explicit value-
+discovery requirement instead of a guess. The guarded raw query tools remain
+available for aggregations not yet expressible by the typed operations, and
+apply the same MongoDB schema-aware coercion.
+
+Investigation skills live under `skills/*/SKILL.md`. Only skills matching the
+typed question intent and planned sources are loaded into the evidence prompt.
+Skills contain generic workflows and evidence standards, never customer or
+industry facts. Verified organization/project investigation memory continues
+to be supplied as planning hints only and must be revalidated against current
+evidence.
+
+Production durability is implemented through two separate stores. LangGraph
+uses a configured async PostgreSQL checkpointer with synchronous step
+durability; SQLite is supported for durable local development. The backend
+persists each bounded evidence item in an append-only tenant/project-scoped
+ledger with a content hash. A resumed process rehydrates its execution-local
+evidence cache from checkpointed state.
+
+Multiple backend instances coordinate through database execution leases. A
+dispatcher claims queued or expired work under configurable global,
+organization, and project limits; heartbeats renew ownership and an execution-
+attempt fencing token rejects late progress, failure, or completion callbacks
+from an expired worker. Independent planned sources are collected concurrently
+by bounded source-specific workers, while the parent LangGraph remains the only
+orchestrator and deterministic validator.
+
+Sandboxed code execution is intentionally not part of this rollout. Future
+sandbox workers must be isolated, network-denied by default, and must never
+receive production database credentials.
+
 ### Decision-path tracing
 
 Incident evidence collection follows a code-to-runtime causal path:

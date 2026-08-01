@@ -1,3 +1,5 @@
+import asyncio
+import os
 from datetime import datetime, timezone
 
 from deep_agent.agents.evidence_agent import create_evidence_agent
@@ -17,6 +19,7 @@ from deep_agent.services.evidence_repository import (
     reset_investigation,
 )
 from deep_agent.services.evidence_context import compact_evidence
+from deep_agent.services.skills import select_skills
 
 
 async def collect_evidence_node(
@@ -36,6 +39,11 @@ async def collect_evidence_node(
     prior_evidence = await evidence_repository.list_by_investigation(
         investigation_id
     )
+    # A durable LangGraph checkpoint may outlive this process-local cache.
+    # Rehydrate the cache from checkpointed state before continuing a resumed run.
+    for item in state.get("evidence", []):
+        await evidence_repository.save(investigation_id, item)
+    prior_evidence = await evidence_repository.list_by_investigation(investigation_id)
     if not any(
         item.evidence_type == EvidenceType.USER_INPUT
         for item in prior_evidence
@@ -56,6 +64,12 @@ async def collect_evidence_node(
         await evidence_repository.save(investigation_id, reported)
         prior_evidence = [*prior_evidence, reported]
     prior_summary = compact_evidence(prior_evidence, max_items=18)
+    planned_sources = set(source_plan.sources) if source_plan else {EvidenceSource.DATABASE}
+    active_skills = select_skills(understanding, planned_sources)
+    skill_context = [
+        {"name": skill.name, "instructions": skill.instructions}
+        for skill in active_skills
+    ]
     investigation_plan = [
         item.model_dump(mode="json")
         for item in state.get("investigation_plan", [])
@@ -70,10 +84,13 @@ async def collect_evidence_node(
         f"{source_plan.model_dump(mode='json') if source_plan else {'sources': ['database']}}\n"
         f"Investigation plan: {investigation_plan}\n"
         f"Connected database types (authoritative): {database_inventory}\n"
+        f"Execution context manifest (authoritative capabilities and limits): "
+        f"{state.get('context_manifest', {})}\n"
         f"Relevant organization-scoped prior learnings (planning hints only; "
         f"not evidence and must be independently revalidated): "
         f"{organization_knowledge}\n"
         f"Evidence already collected (continue from it; do not repeat): {prior_summary}\n"
+        f"Applicable investigation skills (loaded on demand): {skill_context}\n"
         "Inspect schemas before records. Collect facts only; do not determine root cause. "
         "TraceX organization and project identifiers are control-plane metadata and "
         "must never be used as values in client database filters or queries."
@@ -96,24 +113,44 @@ async def collect_evidence_node(
             )
         ):
             sources.add(EvidenceSource.WEB)
-        agent = create_evidence_agent(sources)
-        await invoke_with_rate_limit_retry(
-            lambda: agent.ainvoke(
-                {"messages": [{"role": "user", "content": prompt}]},
-                config={"configurable": {
-                    "investigation_id": investigation_id,
-                    "organization_id": state["organization_id"],
-                    "project_id": state["project_id"],
-                }, "callbacks": (config or {}).get("callbacks"),
-                    "recursion_limit": 30},
-            ),
-            stage="Evidence collection",
+        selected_groups = (
+            [{source} for source in sorted(sources, key=lambda item: item.value)]
+            if sources and len(sources) > 1
+            else [sources]
         )
+        semaphore = asyncio.Semaphore(max(
+            1, int(os.getenv("EVIDENCE_SOURCE_MAX_CONCURRENCY", "3"))
+        ))
+
+        async def collect_group(group):
+            async with semaphore:
+                agent = create_evidence_agent(group)
+                label = ",".join(item.value for item in group) if group else "default"
+                return await invoke_with_rate_limit_retry(
+                    lambda: agent.ainvoke(
+                        {"messages": [{"role": "user", "content": prompt}]},
+                        config={"configurable": {
+                            "investigation_id": investigation_id,
+                            "organization_id": state["organization_id"],
+                            "project_id": state["project_id"],
+                        }, "callbacks": (config or {}).get("callbacks"),
+                            "recursion_limit": 30},
+                    ),
+                    stage=f"Evidence collection ({label})",
+                )
+
+        results = await asyncio.gather(
+            *(collect_group(group) for group in selected_groups),
+            return_exceptions=True,
+        )
+        failures = [result for result in results if isinstance(result, Exception)]
+        if failures and len(failures) == len(results):
+            raise failures[0]
         evidence = await evidence_repository.list_by_investigation(investigation_id)
         return {
             "evidence": evidence,
             "evidence_collection_attempts": state.get("evidence_collection_attempts", 0) + 1,
-            "evidence_collection_errors": [],
+            "evidence_collection_errors": [str(item) for item in failures],
             "requested_evidence": [],
             "current_stage": "evidence_validation",
         }

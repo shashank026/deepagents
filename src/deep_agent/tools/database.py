@@ -98,6 +98,9 @@ def run_safe_mongodb_query(
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", collection):
         raise ValueError("Invalid MongoDB collection name")
     safe_limit = max(1, min(int(limit), MAX_ROWS))
+    field_types = _mongodb_field_types(source, collection)
+    typed_filter = _coerce_mongodb_schema_types(filter_query or {}, field_types)
+    typed_pipeline = _coerce_mongodb_pipeline_types(pipeline or [], field_types)
     _validate_mongodb_value(filter_query or {})
     _validate_mongodb_value(pipeline or [])
     _validate_mongodb_value(projection or {})
@@ -118,15 +121,15 @@ def run_safe_mongodb_query(
         target = database[collection]
         if pipeline is not None:
             bounded_pipeline = _bounded_mongodb_pipeline(
-                pipeline,
-                filter_query,
+                typed_pipeline,
+                typed_filter,
                 safe_limit,
             )
             rows = list(target.aggregate(bounded_pipeline, maxTimeMS=15000))
             operation: dict[str, Any] = {"pipeline": bounded_pipeline}
         else:
             cursor = target.find(
-                _coerce_mongodb_ids(filter_query or {}),
+                typed_filter,
                 projection,
                 max_time_ms=15000,
             )
@@ -135,7 +138,7 @@ def run_safe_mongodb_query(
                 cursor = cursor.sort(normalized_sort)
             rows = list(cursor.limit(safe_limit))
             operation = {
-                "filter": filter_query or {},
+                "filter": _json_safe(typed_filter),
                 "projection": projection,
                 "sort": normalized_sort if sort else None,
                 "limit": safe_limit,
@@ -150,6 +153,8 @@ def run_safe_mongodb_query(
             "row_count": len(records),
             "truncated": len(records) >= safe_limit,
             "execution_time_ms": int((monotonic() - started) * 1000),
+            "schema_validated": True,
+            "field_types": field_types,
             "error": None,
         }
     finally:
@@ -366,6 +371,111 @@ def _coerce_mongodb_ids(value: Any, key: str = "") -> Any:
         from bson import ObjectId
         return ObjectId(value)
     return value
+
+
+def _mongodb_field_types(source: Any, collection: str) -> dict[str, str]:
+    """Return analyzed BSON types for a collection without guessing a domain."""
+    candidates = []
+    for item in source.analysis.get("objects", []):
+        name = str(item.get("name", ""))
+        qualified = f"{item.get('namespace')}.{name}"
+        if collection in {name, qualified}:
+            candidates.append(item)
+    if not candidates:
+        raise ValueError(
+            f"Collection {collection!r} is absent from the analyzed schema"
+        )
+    fields = candidates[0].get("fields", [])
+    return {
+        str(field.get("name")): str(field.get("data_type", "unknown"))
+        for field in fields
+        if field.get("name")
+    }
+
+
+def _coerce_scalar_for_mongodb_type(value: Any, data_type: str, field: str) -> Any:
+    normalized = {
+        part.strip().lower()
+        for part in re.split(r"\||,", data_type)
+        if part.strip()
+    }
+    # Mixed schemas are ambiguous. Keep an already native value, but do not
+    # guess how a string should be represented when several types are observed.
+    if len(normalized) > 1:
+        if isinstance(value, str):
+            raise ValueError(
+                f"Field {field!r} has ambiguous analyzed types {data_type!r}; "
+                "discover representative values before filtering it"
+            )
+        return value
+    kind = next(iter(normalized), "unknown")
+    if kind in {"objectid", "object_id"}:
+        from bson import ObjectId
+        if isinstance(value, ObjectId):
+            return value
+        if not isinstance(value, str) or not ObjectId.is_valid(value):
+            raise ValueError(f"Field {field!r} requires a valid MongoDB ObjectId")
+        return ObjectId(value)
+    if kind in {"date", "datetime"} and isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"Field {field!r} requires an ISO-8601 datetime") from exc
+    if kind in {"int", "int32", "int64", "long"} and not isinstance(value, bool):
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Field {field!r} requires an integer") from exc
+    if kind in {"double", "float", "decimal", "decimal128"}:
+        try:
+            return float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Field {field!r} requires a numeric value") from exc
+    if kind in {"bool", "boolean"} and isinstance(value, str):
+        if value.lower() in {"true", "false"}:
+            return value.lower() == "true"
+        raise ValueError(f"Field {field!r} requires true or false")
+    return _coerce_mongodb_ids(value, field)
+
+
+def _coerce_mongodb_schema_types(
+    value: Any,
+    field_types: dict[str, str],
+    field: str | None = None,
+) -> Any:
+    if isinstance(value, dict):
+        converted = {}
+        for key, item in value.items():
+            next_field = field if key.startswith("$") else key
+            converted[key] = _coerce_mongodb_schema_types(
+                item, field_types, next_field
+            )
+        return converted
+    if isinstance(value, list):
+        return [
+            _coerce_mongodb_schema_types(item, field_types, field)
+            for item in value
+        ]
+    if field and field in field_types:
+        return _coerce_scalar_for_mongodb_type(value, field_types[field], field)
+    return _coerce_mongodb_ids(value, field or "")
+
+
+def _coerce_mongodb_pipeline_types(
+    pipeline: list[dict[str, Any]], field_types: dict[str, str]
+) -> list[dict[str, Any]]:
+    converted = []
+    for stage in pipeline:
+        if "$match" in stage:
+            converted.append({
+                **stage,
+                "$match": _coerce_mongodb_schema_types(
+                    stage["$match"], field_types
+                ),
+            })
+        else:
+            converted.append(_coerce_mongodb_ids(stage))
+    return converted
 
 
 def _json_safe(value: Any) -> Any:

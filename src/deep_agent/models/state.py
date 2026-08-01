@@ -23,6 +23,7 @@ class InvestigationState(TypedDict, total=False):
     extracted_entities: dict[str, Any]
     query_understanding: QueryUnderstanding | None
     evidence_source_plan: EvidenceSourcePlan | None
+    context_manifest: dict[str, Any]
     investigation_plan: list[InvestigationPlanStep]
     repository_context: dict[str, Any]
     schema_context: dict[str, Any]
@@ -41,3 +42,4 @@ class InvestigationState(TypedDict, total=False):
     report_validation_errors: list[str]
     current_stage: str
     failure_reason: str | None
+    max_runtime_seconds: int | None

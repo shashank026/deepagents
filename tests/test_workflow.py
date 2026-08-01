@@ -10,8 +10,10 @@ from deep_agent.nodes.investigation import route_after_investigation
 from deep_agent.nodes.report_builder import build_final_report_node
 from deep_agent.nodes.root_cause_validation import validate_root_cause_node
 from deep_agent.nodes.query_understanding import extract_business_entities_node
+from deep_agent.nodes.context_manifest import build_context_manifest_node
 from deep_agent.nodes.source_planning import plan_evidence_sources_node
 from deep_agent.models.query import EvidenceSource
+from deep_agent.models.query import TypedQueryIntent
 from deep_agent.models.execution import InvestigationPlanStep
 from deep_agent.agents import evidence_agent
 from deep_agent import api as deepagents_api
@@ -39,10 +41,14 @@ from deep_agent.tools.database import (
     _normalize_mongodb_sort,
     _bounded_mongodb_pipeline,
     _coerce_mongodb_ids,
+    _coerce_mongodb_schema_types,
     _validate_mongodb_value,
 )
 from deep_agent.tools import database as database_tools
 from deep_agent.tools.tools import retrieve_schema_context
+from deep_agent.services.skills import select_skills
+from deep_agent.services.checkpointing import checkpoint_provider
+from deep_agent.models.query import EvidenceSourcePlan
 
 
 def evidence():
@@ -172,7 +178,6 @@ def test_every_project_query_plans_connected_code_and_database_sources(
     assert update["evidence_source_plan"].sources == [
         EvidenceSource.DATABASE,
         EvidenceSource.CODEBASE,
-        EvidenceSource.WEB,
     ]
     assert {step.stage for step in update["investigation_plan"]} >= {
         "codebase", "schema", "database", "validation",
@@ -352,6 +357,74 @@ def test_evidence_collection_persists_customer_report_as_evidence(monkeypatch):
         assert len(reports) == 1
         assert "current plan" in reports[0].content["reported_text"]
         await evidence_repository.clear(investigation_id)
+
+    asyncio.run(scenario())
+
+
+def test_evidence_collection_runs_planned_sources_as_isolated_workers(monkeypatch):
+    created = []
+
+    class FakeAgent:
+        def __init__(self, sources):
+            self.sources = sources
+
+        async def ainvoke(self, *_args, **_kwargs):
+            await asyncio.sleep(0)
+            return {}
+
+    def create(sources):
+        created.append({item.value for item in sources})
+        return FakeAgent(sources)
+
+    monkeypatch.setattr(evidence_collection, "create_evidence_agent", create)
+    investigation_id = "parallel-source-test"
+
+    async def scenario():
+        await evidence_repository.clear(investigation_id)
+        await evidence_collection.collect_evidence_node({
+            "investigation_id": investigation_id,
+            "user_query": "Why did the operation fail?",
+            "organization_id": "org-1",
+            "project_id": "project-1",
+            "database_sources": [],
+            "evidence_source_plan": EvidenceSourcePlan(sources=[
+                EvidenceSource.DATABASE, EvidenceSource.LOGS,
+            ]),
+            "evidence_collection_attempts": 0,
+        })
+        await evidence_repository.clear(investigation_id)
+
+    asyncio.run(scenario())
+    assert created == [{"database"}, {"logs"}]
+
+
+def test_sqlite_checkpoint_provider_persists_thread_state(monkeypatch, tmp_path):
+    from langgraph.graph import END, START, StateGraph
+
+    monkeypatch.setenv(
+        "CHECKPOINT_DATABASE_URL",
+        f"sqlite+aiosqlite:///{tmp_path / 'checkpoints.sqlite'}",
+    )
+
+    async def scenario():
+        async with checkpoint_provider() as saver:
+            builder = StateGraph(dict)
+            builder.add_node("increment", lambda state: {"value": state["value"] + 1})
+            builder.add_edge(START, "increment")
+            builder.add_edge("increment", END)
+            graph = builder.compile(checkpointer=saver)
+            config = {"configurable": {"thread_id": "durable-thread"}}
+            assert (await graph.ainvoke({"value": 1}, config))["value"] == 2
+        async with checkpoint_provider() as saver:
+            builder = StateGraph(dict)
+            builder.add_node("increment", lambda state: state)
+            builder.add_edge(START, "increment")
+            builder.add_edge("increment", END)
+            graph = builder.compile(checkpointer=saver)
+            snapshot = await graph.aget_state(
+                {"configurable": {"thread_id": "durable-thread"}}
+            )
+            assert snapshot.values["value"] == 2
 
     asyncio.run(scenario())
 
@@ -1449,7 +1522,7 @@ def test_verifier_is_domain_agnostic_for_new_entity_types():
     assert final_answer_evidence({**state, "evidence": [named]}) is not None
 
 
-def test_source_planner_selects_database_code_and_logs_for_incident(
+def test_source_planner_starts_incident_with_runtime_sources_and_optional_code(
     monkeypatch,
 ):
     monkeypatch.setenv("WEB_RESEARCH_ENABLED", "true")
@@ -1461,9 +1534,10 @@ def test_source_planner_selects_database_code_and_logs_for_incident(
         "query_understanding": understanding,
     })
     assert set(update["evidence_source_plan"].sources) == {
-        EvidenceSource.DATABASE, EvidenceSource.CODEBASE, EvidenceSource.LOGS,
-        EvidenceSource.WEB,
+        EvidenceSource.DATABASE, EvidenceSource.LOGS,
     }
+    assert EvidenceSource.CODEBASE in update["evidence_source_plan"].optional_sources
+    assert EvidenceSource.WEB in update["evidence_source_plan"].optional_sources
 
 
 def test_source_planner_keeps_simple_retrieval_database_only():
@@ -1474,6 +1548,67 @@ def test_source_planner_keeps_simple_retrieval_database_only():
         "user_query": "List users", "query_understanding": understanding
     })["evidence_source_plan"]
     assert plan.sources == [EvidenceSource.DATABASE]
+
+
+def test_connected_repository_is_optional_for_database_retrieval():
+    query = "List the latest ten accounts"
+    understanding = extract_business_entities_node({"user_query": query})["query_understanding"]
+    plan = plan_evidence_sources_node({
+        "user_query": query,
+        "query_understanding": understanding,
+        "database_sources": [{"connection_id": "db-1"}],
+        "codebase_sources": [{"connection_id": "repo-1"}],
+    })["evidence_source_plan"]
+    assert plan.sources == [EvidenceSource.DATABASE]
+    assert plan.optional_sources == [EvidenceSource.CODEBASE]
+
+
+def test_context_manifest_excludes_database_credentials():
+    manifest = build_context_manifest_node({
+        "investigation_id": "inv-1",
+        "organization_id": "org-1",
+        "project_id": "project-1",
+        "database_sources": [{
+            "connection_id": "db-1",
+            "provider": "mongodb",
+            "connection_url": "mongodb://secret@example.invalid/customer",
+            "analysis": {"schema_hash": "schema-v1", "objects": []},
+        }],
+        "codebase_sources": [],
+    })["context_manifest"]
+    assert manifest["sources"][0]["version"] == "schema-v1"
+    assert "secret" not in repr(manifest)
+
+
+def test_database_skill_is_progressively_selected_for_database_plan():
+    understanding = extract_business_entities_node({"user_query": "List users"})["query_understanding"]
+    skills = select_skills(understanding, {EvidenceSource.DATABASE})
+    assert [item.name for item in skills] == ["database-investigation"]
+
+
+def test_mongodb_schema_type_coercion_does_not_depend_on_field_name():
+    value = _coerce_mongodb_schema_types(
+        {"objectType": "695653deffb2f9d2eccdd6d5"},
+        {"objectType": "ObjectId"},
+    )
+    assert str(value["objectType"]) == "695653deffb2f9d2eccdd6d5"
+    assert value["objectType"].__class__.__name__ == "ObjectId"
+
+
+def test_mongodb_schema_type_coercion_applies_inside_operators():
+    value = _coerce_mongodb_schema_types(
+        {"owner": {"$in": ["695653deffb2f9d2eccdd6d5"]}},
+        {"owner": "objectId"},
+    )
+    assert value["owner"]["$in"][0].__class__.__name__ == "ObjectId"
+
+
+def test_mongodb_ambiguous_string_filter_requires_value_discovery():
+    with pytest.raises(ValueError, match="ambiguous analyzed types"):
+        _coerce_mongodb_schema_types(
+            {"reference": "42"},
+            {"reference": "ObjectId | str"},
+        )
 
 
 def test_source_planner_supports_codebase_only_lookup():
@@ -1495,5 +1630,5 @@ def test_source_planner_combines_logs_and_database_for_concrete_id(
         "user_query": query, "query_understanding": understanding
     })["evidence_source_plan"]
     assert set(plan.sources) == {
-        EvidenceSource.DATABASE, EvidenceSource.LOGS, EvidenceSource.WEB,
+        EvidenceSource.DATABASE, EvidenceSource.LOGS,
     }

@@ -21,6 +21,7 @@ from deep_agent.tools.github import (
     inspect_symbol as _github_inspect_symbol, search_code as _github_search,
 )
 from deep_agent.services.database_context import database_source
+from deep_agent.models.query import TypedQueryIntent
 from deep_agent.tools.web_research import (
     fetch_public_page as _fetch_public_page,
     search_public_web as _search_public_web,
@@ -138,6 +139,118 @@ async def discover_field_values(
             "field_name": field_name,
             "semantic_discovery": True,
         },
+    )
+
+
+def _typed_mongodb_operation(intent: TypedQueryIntent) -> dict[str, Any]:
+    operators = {
+        "ne": "$ne", "in": "$in", "nin": "$nin", "gt": "$gt",
+        "gte": "$gte", "lt": "$lt", "lte": "$lte", "exists": "$exists",
+    }
+    filters: dict[str, Any] = {}
+    for item in intent.filters:
+        if item.operator == "eq":
+            filters[item.field] = item.value
+        else:
+            filters.setdefault(item.field, {})[operators[item.operator]] = item.value
+    projection = {field: 1 for field in intent.projection} or None
+    sort = [[item.field, item.direction] for item in intent.sort] or None
+    if intent.operation == "count":
+        return {"pipeline": [{"$match": filters}, {"$count": "count"}]}
+    if intent.operation == "distinct":
+        if not intent.distinct_field:
+            raise ValueError("distinct operation requires distinct_field")
+        return {"pipeline": [
+            {"$match": filters},
+            {"$group": {"_id": f"${intent.distinct_field}"}},
+            {"$project": {"_id": 0, "value": "$_id"}},
+        ]}
+    return {"filter_query": filters, "projection": projection, "sort": sort}
+
+
+def _sql_literal(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _typed_sql(intent: TypedQueryIntent, provider: str, fields: set[str]) -> str:
+    quote = "`" if provider == "mysql" else '"'
+    identifier = lambda value: quote + value.replace(quote, quote * 2) + quote
+    selected = intent.projection or sorted(fields)
+    if intent.operation == "find" and not selected:
+        raise ValueError("Analyzed schema has no selectable fields")
+    if intent.operation == "count":
+        select = "COUNT(*) AS count"
+    elif intent.operation == "distinct":
+        if not intent.distinct_field:
+            raise ValueError("distinct operation requires distinct_field")
+        select = f"DISTINCT {identifier(intent.distinct_field)} AS value"
+    else:
+        select = ", ".join(identifier(field) for field in selected)
+    operator = {
+        "eq": "=", "ne": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<=",
+    }
+    clauses = []
+    for item in intent.filters:
+        column = identifier(item.field)
+        if item.operator in {"in", "nin"}:
+            if not isinstance(item.value, list) or not item.value:
+                raise ValueError(f"{item.operator} requires a non-empty list")
+            keyword = "IN" if item.operator == "in" else "NOT IN"
+            clauses.append(
+                f"{column} {keyword} ({', '.join(_sql_literal(v) for v in item.value)})"
+            )
+        elif item.operator == "exists":
+            clauses.append(f"{column} IS {'NOT ' if item.value else ''}NULL")
+        elif item.value is None and item.operator in {"eq", "ne"}:
+            clauses.append(f"{column} IS {'NOT ' if item.operator == 'ne' else ''}NULL")
+        else:
+            clauses.append(f"{column} {operator[item.operator]} {_sql_literal(item.value)}")
+    query = f"SELECT {select} FROM {'.'.join(identifier(p) for p in intent.object_name.split('.'))}"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    if intent.sort and intent.operation == "find":
+        query += " ORDER BY " + ", ".join(
+            f"{identifier(item.field)} {item.direction.upper()}" for item in intent.sort
+        )
+    return query
+
+
+async def execute_typed_database_query(intent: TypedQueryIntent) -> dict[str, Any]:
+    """Compile a provider-neutral intent against analyzed schema, then execute it."""
+    schema = _get_table(intent.object_name)
+    if schema.get("error"):
+        raise ValueError(schema["error"])
+    fields = {str(item.get("name")) for item in schema.get("fields", [])}
+    referenced = {
+        *intent.projection,
+        *(item.field for item in intent.filters),
+        *(item.field for item in intent.sort),
+        *([intent.distinct_field] if intent.distinct_field else []),
+    }
+    unknown = sorted(field for field in referenced if field not in fields)
+    if unknown:
+        raise ValueError(f"Fields are absent from analyzed schema: {', '.join(unknown)}")
+    source = database_source(schema.get("connection_id"))
+    if source.provider == "mongodb":
+        operation = _typed_mongodb_operation(intent)
+        return await run_safe_mongodb_query(
+            collection=schema["name"],
+            limit=intent.limit,
+            connection_id=source.connection_id,
+            purpose=intent.purpose,
+            **operation,
+        )
+    query = _typed_sql(intent, source.provider, fields)
+    return await run_safe_read_query(
+        query=query,
+        connection_id=source.connection_id,
+        purpose=intent.purpose,
     )
 
 

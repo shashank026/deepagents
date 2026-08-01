@@ -49,13 +49,13 @@ def self_check_node(state: InvestigationState) -> dict:
                 reason="The final query returned zero rows.",
                 evidence_ids=[item.id],
                 correction=(
-                    "Inspect stored values and code mappings, then revise the "
-                    "filter without changing tenant scope."
+                    "Inspect schema-native field types and representative stored "
+                    "values, then revise the filter without changing tenant scope."
                 ),
             ))
             requested.append(
-                "Inspect representative stored values and authoritative code "
-                "mappings before retrying the empty final query."
+                "Inspect schema-native types and representative stored values "
+                "before retrying the empty final query."
             )
 
     failed = _dedupe(failed, lambda item: (item.assumption, item.reason))
@@ -86,9 +86,28 @@ def revise_investigation_node(state: InvestigationState) -> dict:
     for item in state.get("failed_assumptions", []):
         if item.retryable and item.correction:
             requested.append(item.correction)
+    source_plan = state.get("evidence_source_plan")
+    if source_plan:
+        requested_text = " ".join(requested).lower()
+        additions = []
+        for source in source_plan.optional_sources:
+            source_terms = {
+                "codebase": ("code", "implementation", "mapping", "decision path"),
+                "logs": ("log", "runtime", "timeline", "event"),
+                "web": ("documentation", "specification", "release note"),
+            }.get(source.value, (source.value,))
+            if any(term in requested_text for term in source_terms):
+                additions.append(source)
+        source_plan = source_plan.model_copy(update={
+            "sources": list(dict.fromkeys([*source_plan.sources, *additions])),
+            "optional_sources": [
+                item for item in source_plan.optional_sources if item not in additions
+            ],
+        })
     return {
         "retry_counts": retries,
         "requested_evidence": list(dict.fromkeys(requested))[:3],
+        "evidence_source_plan": source_plan,
         "current_stage": "revise_investigation",
     }
 

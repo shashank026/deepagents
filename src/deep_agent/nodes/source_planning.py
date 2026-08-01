@@ -50,7 +50,15 @@ def plan_evidence_sources_node(state: InvestigationState) -> dict:
             "values, and runtime state."
         )
 
-    if has_codebase:
+    # A connected repository is an available source, not a mandatory source.
+    # Start with the smallest authoritative source set and escalate only when
+    # the requested answer actually depends on application behavior.
+    needs_code_initially = has_codebase and (
+        explicit_code
+        or understanding.intent == "explanation"
+        or (incident and not has_database)
+    )
+    if needs_code_initially:
         sources.append(EvidenceSource.CODEBASE)
         reasons[EvidenceSource.CODEBASE] = (
             "Verify application behavior, database relationships, mappings, "
@@ -62,12 +70,11 @@ def plan_evidence_sources_node(state: InvestigationState) -> dict:
         sources.append(EvidenceSource.LOGS)
         reasons[EvidenceSource.LOGS] = "Verify runtime events, failures, and event chronology."
 
-    if (
-        web_research_enabled()
-        and understanding.intent in {
-            "incident_investigation", "informational", "explanation",
-        }
-    ):
+    explicit_external = any(term in query for term in {
+        "documentation", "specification", "release note", "security advisory",
+        "official docs", "vendor docs", "upstream",
+    })
+    if web_research_enabled() and explicit_external:
         sources.append(EvidenceSource.WEB)
         reasons[EvidenceSource.WEB] = (
             "Consult allowlisted official public documentation for current "
@@ -78,7 +85,37 @@ def plan_evidence_sources_node(state: InvestigationState) -> dict:
 
     # Preserve order while removing duplicates introduced by overlapping rules.
     sources = list(dict.fromkeys(sources))
-    plan = EvidenceSourcePlan(sources=sources, reasons=reasons)
+    optional_sources: list[EvidenceSource] = []
+    escalation_reasons: dict[EvidenceSource, list[str]] = {}
+    if has_codebase and EvidenceSource.CODEBASE not in sources:
+        optional_sources.append(EvidenceSource.CODEBASE)
+        escalation_reasons[EvidenceSource.CODEBASE] = [
+            "The stored value has unresolved business meaning.",
+            "Database or runtime evidence contradicts expected behavior.",
+            "The implementing decision path is required to explain root cause.",
+        ]
+    if EvidenceSource.LOGS not in sources and incident:
+        optional_sources.append(EvidenceSource.LOGS)
+        escalation_reasons[EvidenceSource.LOGS] = [
+            "A runtime chronology or error event is required to test a hypothesis."
+        ]
+    if (
+        web_research_enabled()
+        and EvidenceSource.WEB not in sources
+        and understanding.intent in {
+            "incident_investigation", "informational", "explanation",
+        }
+    ):
+        optional_sources.append(EvidenceSource.WEB)
+        escalation_reasons[EvidenceSource.WEB] = [
+            "An unresolved public provider behavior, specification, release change, or advisory requires an official source."
+        ]
+    plan = EvidenceSourcePlan(
+        sources=sources,
+        reasons=reasons,
+        optional_sources=optional_sources,
+        escalation_reasons=escalation_reasons,
+    )
     investigation_plan = []
     if EvidenceSource.CODEBASE in sources:
         investigation_plan.append(InvestigationPlanStep(

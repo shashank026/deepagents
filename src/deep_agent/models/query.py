@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -35,3 +36,35 @@ class QueryUnderstanding(BaseModel):
 class EvidenceSourcePlan(BaseModel):
     sources: list[EvidenceSource]
     reasons: dict[EvidenceSource, str] = Field(default_factory=dict)
+    optional_sources: list[EvidenceSource] = Field(default_factory=list)
+    escalation_reasons: dict[EvidenceSource, list[str]] = Field(
+        default_factory=dict
+    )
+
+
+class TypedQueryFilter(BaseModel):
+    """Provider-neutral filter compiled against analyzed database metadata."""
+
+    field: str
+    operator: Literal[
+        "eq", "ne", "in", "nin", "gt", "gte", "lt", "lte", "exists"
+    ] = "eq"
+    value: Any = None
+
+
+class TypedQuerySort(BaseModel):
+    field: str
+    direction: Literal["asc", "desc"] = "asc"
+
+
+class TypedQueryIntent(BaseModel):
+    """A safe intermediate representation; it is not executable query text."""
+
+    object_name: str
+    operation: Literal["find", "count", "distinct"] = "find"
+    filters: list[TypedQueryFilter] = Field(default_factory=list)
+    projection: list[str] = Field(default_factory=list)
+    sort: list[TypedQuerySort] = Field(default_factory=list)
+    distinct_field: str | None = None
+    limit: int = Field(default=100, ge=1, le=100)
+    purpose: Literal["exploration", "final_answer"] = "exploration"

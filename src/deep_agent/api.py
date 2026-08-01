@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import asyncio
 import json
 import logging
+import os
 import secrets
 from asyncio import Task, to_thread
 from typing import Any
@@ -35,6 +36,7 @@ class CodebaseSourceRequest(BaseModel):
 
 class InvestigationRequest(BaseModel):
     execution_id: str | None = None
+    execution_attempt: int = Field(default=1, ge=1)
     question: str = Field(min_length=3, max_length=4000)
     organization_id: str
     project_id: str
@@ -73,10 +75,15 @@ def _send_progress(url: str, token: str, payload: dict[str, Any]) -> None:
         pass
 
 
-def _send_completion(url: str, token: str, result: dict[str, Any]) -> None:
+def _send_completion(
+    url: str, token: str, result: dict[str, Any], execution_attempt: int
+) -> None:
     request = Request(
         url,
-        data=json.dumps({"result": result}).encode("utf-8"),
+        data=json.dumps({
+            "result": result,
+            "execution_attempt": execution_attempt,
+        }).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
             "X-Internal-Token": token,
@@ -231,7 +238,15 @@ class InvestigationTraceCallback(BaseCallbackHandler):
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    checkpoint_url = os.getenv("CHECKPOINT_DATABASE_URL", "").strip()
+    return {
+        "status": "ok",
+        "checkpointing": (
+            "postgresql" if checkpoint_url.startswith(("postgres", "postgresql"))
+            else "sqlite" if checkpoint_url.startswith("sqlite")
+            else "ephemeral"
+        ),
+    }
 
 
 @app.post("/v1/investigations/{execution_id}/cancel")
@@ -344,6 +359,7 @@ async def investigate(payload: InvestigationRequest) -> dict[str, Any]:
                             payload.callback_token.get_secret_value(),
                             {
                                 "completed_stage": node_name,
+                                "execution_attempt": payload.execution_attempt,
                                 "completed_label": completed_label,
                                 "next_stage": current_stage,
                                 "next_label": next_label,
@@ -431,6 +447,7 @@ async def investigate(payload: InvestigationRequest) -> dict[str, Any]:
                     payload.completion_url,
                     payload.callback_token.get_secret_value(),
                     response_payload,
+                    payload.execution_attempt,
                 )
             except Exception:
                 logger.warning(

@@ -17,6 +17,7 @@ from deep_agent.tools.evidence_tools import (
     search_database_objects,
     discover_field_values,
     retrieve_relevant_schema,
+    execute_typed_database_query,
     search_codebase, get_codebase_file, get_codebase_commit,
     get_codebase_tree, get_codebase_blob, inspect_codebase_symbol,
     search_logs,
@@ -351,6 +352,7 @@ def create_evidence_agent(sources: set[EvidenceSource] | None = None):
             search_database_objects,
             retrieve_relevant_schema,
             discover_field_values,
+            execute_typed_database_query,
         ])
         if providers & {"postgresql", "mysql", "oracle"}:
             tools.append(run_safe_read_query)
@@ -379,7 +381,10 @@ def create_evidence_agent(sources: set[EvidenceSource] | None = None):
     if EvidenceSource.DATABASE in selected:
         source_instructions.append(
             "Start with retrieve_relevant_schema and follow the database contract "
-            "in the system prompt. Return a final proof record, not an exploratory sample."
+            "in the system prompt. Prefer execute_typed_database_query so field names "
+            "and MongoDB BSON types are validated deterministically. Use a raw provider "
+            "query only when the typed operations cannot express a required aggregation. "
+            "Return a final proof record, not an exploratory sample."
         )
     if EvidenceSource.CODEBASE in selected:
         source_instructions.append(

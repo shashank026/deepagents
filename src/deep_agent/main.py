@@ -11,6 +11,7 @@ from deep_agent.services.progress import bind_progress_sink, reset_progress_sink
 from deep_agent.services.database_context import bind_database_sources, reset_database_sources
 from deep_agent.services.codebase_context import bind_codebase_sources, reset_codebase_sources
 from deep_agent.workflow.investigation_graph import create_investigation_graph
+from deep_agent.services.checkpointing import checkpoint_provider
 
 # The workflow deliberately revisits evidence collection and validation up to three
 # times. LangGraph counts every node transition, including the final END transition,
@@ -107,10 +108,12 @@ async def investigate_issue(user_query: str, organization_id: str = "local",
     )
     codebase_token = bind_codebase_sources(state["codebase_sources"])
     try:
-        final = await create_investigation_graph().ainvoke(
-            state, config={"recursion_limit": INVESTIGATION_RECURSION_LIMIT,
-                           "configurable": {"thread_id": state["investigation_id"]}},
-        )
+        async with checkpoint_provider() as checkpointer:
+            final = await create_investigation_graph(checkpointer).ainvoke(
+                state, config={"recursion_limit": INVESTIGATION_RECURSION_LIMIT,
+                               "configurable": {"thread_id": state["investigation_id"]}},
+                durability="sync" if checkpointer else "exit",
+            )
         return final["final_report"]
     finally:
         reset_database_sources(token)
@@ -129,22 +132,37 @@ async def stream_investigation(user_query: str, organization_id: str = "local",
         user_query, organization_id, project_id, database_sources,
         codebase_sources, investigation_id, organization_knowledge
     )
-    graph = create_investigation_graph()
     token = bind_database_sources(
         state["database_sources"],
         {organization_id, project_id},
     )
     codebase_token = bind_codebase_sources(state["codebase_sources"])
     try:
-        async for event in graph.astream(
-            state, config={
+        async with checkpoint_provider() as checkpointer:
+            graph = create_investigation_graph(checkpointer=checkpointer)
+            run_config = {
                 "recursion_limit": INVESTIGATION_RECURSION_LIMIT,
                 "callbacks": callbacks or [],
                 "configurable": {"thread_id": state["investigation_id"]},
-            },
-            stream_mode="updates",
-        ):
-            yield event
+            }
+            run_input = state
+            if checkpointer:
+                snapshot = await graph.aget_state(run_config)
+                if snapshot.values and not snapshot.next and snapshot.values.get("final_report"):
+                    yield {"resume_checkpoint": {
+                        "final_report": snapshot.values["final_report"],
+                        "evidence": snapshot.values.get("evidence", []),
+                        "current_stage": "completed",
+                    }}
+                    return
+                if snapshot.next:
+                    run_input = None
+            async for event in graph.astream(
+                run_input, config=run_config,
+                stream_mode="updates",
+                durability="sync" if checkpointer else "exit",
+            ):
+                yield event
     finally:
         reset_database_sources(token)
         reset_codebase_sources(codebase_token)
