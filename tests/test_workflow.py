@@ -1,4 +1,5 @@
 import asyncio
+import re
 import pytest
 
 from deep_agent.models.evidence import Evidence, EvidenceType
@@ -34,6 +35,7 @@ from deep_agent.nodes.self_check import self_check_node
 from deep_agent.nodes.report_validation import validate_report_node
 from deep_agent.nodes.report_validation import _redact as redact_report_text
 from deep_agent.tools import evidence_tools
+from deep_agent.tools.evidence_tools import _normalized_identity_pattern
 from deep_agent.tools.database import (
     apply_limit,
     validate_read_only_query,
@@ -1811,6 +1813,19 @@ def test_retrieval_request_is_not_labeled_as_incident():
         _user_input_summary("incident_investigation")
         == "Customer-reported incident details"
     )
+
+
+def test_normalized_identity_match_allows_separators_not_extra_characters():
+    pattern = _normalized_identity_pattern("bigbrosai")
+    assert re.fullmatch(pattern, "BIGBROS AI", flags=re.IGNORECASE)
+    assert re.fullmatch(pattern, "Big-Bros_AI", flags=re.IGNORECASE)
+    assert not re.fullmatch(pattern, "Bigbrosaitesting", flags=re.IGNORECASE)
+
+
+def test_mongodb_rejects_unanchored_substring_regex():
+    with pytest.raises(ValueError, match="must be anchored"):
+        _validate_mongodb_value({"name": {"$regex": "bigbrosai"}})
+    _validate_mongodb_value({"name": {"$regex": "^bigbrosai$"}})
 
 
 def test_latest_retrieval_requires_exactly_one_sorted_result():

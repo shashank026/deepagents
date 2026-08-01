@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import re
 from typing import Any
 from typing import Literal
 from uuid import uuid4
@@ -151,6 +152,97 @@ async def discover_field_values(
             "field_name": field_name,
             "semantic_discovery": True,
         },
+    )
+
+
+def _normalized_identity_pattern(value: str) -> str:
+    characters = re.findall(r"[A-Za-z0-9]", value)
+    if not characters:
+        raise ValueError("Entity value must contain letters or numbers")
+    separator = r"[^A-Za-z0-9]*"
+    return "^" + separator.join(re.escape(item) for item in characters) + "$"
+
+
+async def resolve_text_field_value(
+    object_name: str,
+    field_name: str,
+    requested_value: str,
+    connection_id: str | None = None,
+) -> dict[str, Any]:
+    """Resolve one text identity by case/separator-insensitive exact matching."""
+    schema = _get_table(object_name)
+    if schema.get("error"):
+        raise ValueError(schema["error"])
+    fields = {
+        str(field.get("name")): str(field.get("data_type", "unknown"))
+        for field in schema.get("fields", [])
+    }
+    if field_name not in fields:
+        raise ValueError(
+            f"Field {field_name!r} is absent from analyzed schema for "
+            f"{object_name!r}"
+        )
+    field_type = fields[field_name].lower()
+    if not any(term in field_type for term in (
+        "str", "string", "text", "char", "varchar",
+    )):
+        raise ValueError(f"Field {field_name!r} is not an analyzed text field")
+    normalized = re.sub(r"[^a-z0-9]", "", requested_value.lower())
+    if not normalized:
+        raise ValueError("Entity value must contain letters or numbers")
+    source = database_source(connection_id or schema.get("connection_id"))
+    if source.provider == "mongodb":
+        result = _run_mongodb_query(
+            collection=schema["name"],
+            filter_query={
+                field_name: {
+                    "$regex": _normalized_identity_pattern(requested_value),
+                    "$options": "i",
+                }
+            },
+            limit=5,
+            connection_id=source.connection_id,
+        )
+    else:
+        quote = "`" if source.provider == "mysql" else '"'
+        if not all(
+            part.replace("_", "").isalnum()
+            for part in object_name.split(".")
+        ) or not field_name.replace("_", "").isalnum():
+            raise ValueError("Unsafe database identifier")
+        qualified = ".".join(
+            f"{quote}{part}{quote}" for part in object_name.split(".")
+        )
+        column = f"{quote}{field_name}{quote}"
+        replacement = "REGEXP_REPLACE(LOWER({column}), '[^a-z0-9]+', '')"
+        expression = replacement.format(column=column)
+        if source.provider == "postgresql":
+            expression = (
+                f"REGEXP_REPLACE(LOWER({column}), '[^a-z0-9]+', '', 'g')"
+            )
+        result = _run_query(
+            f"SELECT * FROM {qualified} WHERE {expression} = "
+            f"'{normalized}'",
+            source.connection_id,
+        )
+    rows = result.get("rows", [])
+    result.update({
+        "evidence_role": "exploration",
+        "entity_resolution": True,
+        "resolution_method": "normalized_exact",
+        "requested_value": requested_value,
+        "resolved": len(rows) == 1,
+        "ambiguous": len(rows) > 1,
+    })
+    return await _save(
+        source.connection_id,
+        EvidenceType.DATABASE_RECORD,
+        (
+            f"Resolved one value for {object_name}.{field_name}"
+            if len(rows) == 1
+            else f"Could not uniquely resolve {object_name}.{field_name}"
+        ),
+        result,
     )
 
 

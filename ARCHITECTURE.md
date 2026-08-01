@@ -162,6 +162,10 @@ is authoritative for intent; incident-like subject text cannot override a clear
 retrieval request. Ordered retrievals such as last/latest/newest/oldest require
 one sorted `final_answer` row. Exploration samples—even correctly sorted
 ones—trigger a targeted final-proof query instead of an inconclusive report.
+Text identity resolution uses case-and-separator-insensitive exact matching.
+Unanchored MongoDB regex filters are rejected, preventing a requested value
+such as `bigbrosai` from selecting a longer, different identity such as
+`Bigbrosaitesting`; ambiguous resolutions cannot feed a final query.
 
 Focused symbol evidence retains repository, ref, path, blob SHA, line numbers,
 and bounded source snippets, so decisive logic is not lost when large files are

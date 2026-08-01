@@ -19,6 +19,7 @@ from deep_agent.tools.evidence_tools import (
     run_safe_read_query,
     search_database_objects,
     discover_field_values,
+    resolve_text_field_value,
     retrieve_relevant_schema,
     execute_typed_database_query,
     search_codebase, get_codebase_file, get_codebase_commit,
@@ -395,6 +396,7 @@ def create_evidence_agent(sources: set[EvidenceSource] | None = None):
             search_database_objects,
             retrieve_relevant_schema,
             discover_field_values,
+            resolve_text_field_value,
             execute_typed_database_query,
         ])
         if providers & {"postgresql", "mysql", "oracle"}:
@@ -435,6 +437,11 @@ def create_evidence_agent(sources: set[EvidenceSource] | None = None):
             "is invalid and must never fall back to an unfiltered collection scan. "
             "Pass schema-typed identifier filters as scalar strings; the query "
             "compiler converts them to ObjectId or other native BSON types. "
+            "When an exact text identity lookup returns no rows, use "
+            "resolve_text_field_value. Never select an entity using an "
+            "unanchored substring regex; similar names may belong to different "
+            "records. Continue only when normalized-exact resolution returns "
+            "exactly one record. "
             "Return a final proof record, not an exploratory sample."
         )
     if EvidenceSource.CODEBASE in selected:

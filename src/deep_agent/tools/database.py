@@ -288,6 +288,15 @@ def _validate_mongodb_value(value: Any) -> None:
                 raise ValueError(f"Malformed quoted MongoDB operator {key!r}")
             if key.startswith("$") and key not in ALLOWED_MONGO_OPERATORS:
                 raise ValueError(f"Unsupported MongoDB operator {key!r}")
+            if key == "$regex" and (
+                not isinstance(item, str)
+                or not item.startswith("^")
+                or not item.endswith("$")
+            ):
+                raise ValueError(
+                    "MongoDB regex filters must be anchored with ^ and $; "
+                    "use normalized entity resolution for flexible identity matching"
+                )
             if key in FORBIDDEN_MONGO_STAGES | FORBIDDEN_MONGO_OPERATORS:
                 raise ValueError(f"MongoDB operation {key} is not allowed")
             _validate_mongodb_value(item)
