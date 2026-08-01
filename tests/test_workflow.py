@@ -42,6 +42,7 @@ from deep_agent.tools.database import (
     _bounded_mongodb_pipeline,
     _coerce_mongodb_ids,
     _coerce_mongodb_schema_types,
+    _normalize_mongodb_extended_json,
     _validate_mongodb_value,
 )
 from deep_agent.tools import database as database_tools
@@ -1705,6 +1706,53 @@ def test_mongodb_scalar_field_rejects_embedded_object_filter():
             {"organisationId": {"_id": "695653deffb2f9d2eccdd6d1"}},
             {"organisationId": "ObjectId"},
         )
+
+
+@pytest.mark.parametrize("wrapper", ["$oid", "'$oid'", '\"$oid\"'])
+def test_mongodb_objectid_extended_json_wrappers_are_normalized(wrapper):
+    value = _normalize_mongodb_extended_json({
+        "organisationId": {wrapper: "695653deffb2f9d2eccdd6d1"}
+    })
+    assert value["organisationId"].__class__.__name__ == "ObjectId"
+    assert str(value["organisationId"]) == "695653deffb2f9d2eccdd6d1"
+
+
+def test_mongodb_extended_json_rejects_invalid_objectid():
+    with pytest.raises(ValueError, match="valid ObjectId string"):
+        _normalize_mongodb_extended_json({"ownerId": {"$oid": "invalid"}})
+
+
+def test_duplicate_code_file_read_reuses_persisted_evidence(monkeypatch):
+    calls = 0
+
+    def read_file(path, ref, connection_id):
+        nonlocal calls
+        calls += 1
+        return {"path": path, "content": "export class Campaign {}"}
+
+    monkeypatch.setattr(evidence_tools, "_github_contents", read_file)
+
+    async def exercise():
+        token = bind_investigation("inv-deduplicate-code")
+        try:
+            first = await evidence_tools.get_codebase_file(
+                "src/campaign/schemas/campaign.schema.ts"
+            )
+            second = await evidence_tools.get_codebase_file(
+                "src/campaign/schemas/campaign.schema.ts"
+            )
+            saved = await evidence_repository.list_by_investigation(
+                "inv-deduplicate-code"
+            )
+            assert first["result"] == second["result"]
+            assert second["already_collected"] is True
+            assert calls == 1
+            assert len(saved) == 1
+        finally:
+            reset_investigation(token)
+            await evidence_repository.clear("inv-deduplicate-code")
+
+    asyncio.run(exercise())
 
 
 def test_mongodb_tool_rejects_filter_alias_instead_of_scanning():

@@ -429,6 +429,8 @@ def create_evidence_agent(sources: set[EvidenceSource] | None = None):
             "empty exploratory lookup is never evidence of the customer's root cause. "
             "For raw MongoDB finds the predicate argument is filter_query; filter "
             "is invalid and must never fall back to an unfiltered collection scan. "
+            "Pass schema-typed identifier filters as scalar strings; the query "
+            "compiler converts them to ObjectId or other native BSON types. "
             "Return a final proof record, not an exploratory sample."
         )
     if EvidenceSource.CODEBASE in selected:

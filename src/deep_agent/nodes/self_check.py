@@ -25,6 +25,17 @@ def self_check_node(state: InvestigationState) -> dict:
     for item in evidence:
         error = item.content.get("error")
         if error:
+            if item.evidence_type == EvidenceType.DATABASE_QUERY:
+                correction = (
+                    "Re-inspect schema and retry with "
+                    "execute_typed_database_query using the exact "
+                    "analyzed collection and field names and scalar filter "
+                    "values; the schema compiler handles native database types."
+                )
+            else:
+                correction = (
+                    "Re-inspect the connected source and retry with changed inputs."
+                )
             errors.append(ToolError(
                 tool_name=_tool_name(item),
                 error_code=type(error).__name__.upper(),
@@ -36,7 +47,7 @@ def self_check_node(state: InvestigationState) -> dict:
                 assumption=item.summary,
                 reason=str(error),
                 evidence_ids=[item.id],
-                correction="Re-inspect schema/code and retry with changed inputs.",
+                correction=correction,
                 retryable=_retryable_error(str(error)),
             ))
         if (

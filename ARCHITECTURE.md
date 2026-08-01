@@ -152,6 +152,11 @@ reject embedded-object predicates, schema misses return explicit failures with
 exact-name suggestions, and an unfiltered find cannot be labeled
 `final_answer`. These checks prevent a malformed targeted query from degrading
 into a successful-looking collection scan.
+Common Extended JSON ObjectId forms—including quoted `$oid` keys emitted by
+models—are normalized to native BSON before schema coercion. Database type
+errors request a typed-query retry and do not by themselves escalate the source
+plan to GitHub. Exact code-file reads are reused from the investigation evidence
+ledger so revision rounds do not spend calls re-reading identical paths.
 
 Focused symbol evidence retains repository, ref, path, blob SHA, line numbers,
 and bounded source snippets, so decisive logic is not lost when large files are

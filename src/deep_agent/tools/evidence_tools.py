@@ -379,10 +379,31 @@ async def search_codebase(query: str, max_results: int = 30) -> dict[str, Any]:
 async def get_codebase_file(path: str, ref: str | None = None,
                             connection_id: str | None = None) -> dict[str, Any]:
     """Read a GitHub file or directory by path using the Contents API."""
+    existing = await evidence_repository.list_by_investigation(
+        active_investigation_id()
+    )
+    for item in reversed(existing):
+        result = item.content.get("result")
+        if (
+            item.evidence_type == EvidenceType.CODE_REFERENCE
+            and isinstance(result, dict)
+            and result.get("path") == path
+            and item.content.get("requested_ref") == ref
+            and (
+                connection_id is None
+                or item.source == connection_id
+            )
+        ):
+            return {
+                **item.content,
+                "already_collected": True,
+                "evidence_id": item.id,
+            }
     result = _github_contents(path, ref, connection_id)
     return await _save(
         connection_id or "github", EvidenceType.CODE_REFERENCE,
-        f"Read codebase path {path}", {"result": result},
+        f"Read codebase path {path}",
+        {"result": result, "requested_ref": ref},
     )
 
 

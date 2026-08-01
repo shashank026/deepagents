@@ -112,13 +112,21 @@ def run_safe_mongodb_query(
         raise ValueError("Invalid MongoDB collection name")
     safe_limit = max(1, min(int(limit), MAX_ROWS))
     field_types = _mongodb_field_types(source, collection)
-    typed_filter = _coerce_mongodb_schema_types(filter_query or {}, field_types)
-    typed_pipeline = _coerce_mongodb_pipeline_types(pipeline or [], field_types)
-    _validate_mongodb_value(filter_query or {})
-    _validate_mongodb_value(pipeline or [])
-    _validate_mongodb_value(projection or {})
+    # Check model-supplied strings before BSON normalization so protected
+    # TraceX control-plane IDs cannot be hidden inside Extended JSON wrappers.
     _reject_control_plane_values(filter_query or {})
     _reject_control_plane_values(pipeline or [])
+    normalized_filter = _normalize_mongodb_extended_json(filter_query or {})
+    normalized_pipeline = _normalize_mongodb_extended_json(pipeline or [])
+    typed_filter = _coerce_mongodb_schema_types(normalized_filter, field_types)
+    typed_pipeline = _coerce_mongodb_pipeline_types(
+        normalized_pipeline, field_types
+    )
+    _validate_mongodb_value(normalized_filter)
+    _validate_mongodb_value(normalized_pipeline)
+    _validate_mongodb_value(projection or {})
+    _reject_control_plane_values(normalized_filter)
+    _reject_control_plane_values(normalized_pipeline)
 
     from pymongo import MongoClient
 
@@ -286,6 +294,26 @@ def _validate_mongodb_value(value: Any) -> None:
     elif isinstance(value, list):
         for item in value:
             _validate_mongodb_value(item)
+
+
+def _normalize_mongodb_extended_json(value: Any) -> Any:
+    """Convert model-emitted Extended JSON ObjectId wrappers to BSON safely."""
+    if isinstance(value, dict):
+        if len(value) == 1:
+            key, item = next(iter(value.items()))
+            if isinstance(key, str) and key.strip("'\"") == "$oid":
+                from bson import ObjectId
+
+                if not isinstance(item, str) or not ObjectId.is_valid(item):
+                    raise ValueError("MongoDB $oid requires a valid ObjectId string")
+                return ObjectId(item)
+        return {
+            key: _normalize_mongodb_extended_json(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_normalize_mongodb_extended_json(item) for item in value]
+    return value
 
 
 def _normalize_sort_direction(value: Any) -> int:
