@@ -238,6 +238,18 @@ async def investigate_node(state: InvestigationState) -> dict:
         result.requested_evidence = list(dict.fromkeys(
             item.strip() for item in follow_ups if item.strip()
         ))[:3]
+    understanding = state.get("query_understanding")
+    if (
+        understanding
+        and understanding.intent in {"data_retrieval", "informational"}
+        and final_answer_evidence(state) is None
+    ):
+        result.requested_evidence = [
+            "Run one conclusive database query with purpose='final_answer' "
+            "that applies the verified entity filter, requested ordering, "
+            "cardinality, and output fields. Do not reuse an exploration "
+            "sample as the answer."
+        ]
     if result.requested_evidence:
         result.requires_more_evidence = True
     return {"investigation": result, "requested_evidence": result.requested_evidence,

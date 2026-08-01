@@ -35,9 +35,13 @@ def _satisfies_request(query: str, evidence: Evidence) -> bool:
         },
         default=str,
     ).lower()
-    superlative = any(term in lowered for term in (
+    magnitude_superlative = any(term in lowered for term in (
         "highest", "lowest", "maximum", "minimum", " max ", " min ",
     ))
+    temporal_superlative = any(term in lowered for term in (
+        "latest", "newest", "oldest", "last ", "most recent",
+    ))
+    superlative = magnitude_superlative or temporal_superlative
     if superlative:
         if not any(term in operation for term in ("$sort", "order by", "\"sort\"")):
             return False
@@ -81,7 +85,7 @@ def _satisfies_request(query: str, evidence: Evidence) -> bool:
         ):
             return False
 
-    if superlative:
+    if magnitude_superlative:
         numeric_fields = [
             field
             for field, value in normalized_fields.items()

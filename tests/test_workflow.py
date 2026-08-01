@@ -6,6 +6,7 @@ from deep_agent.models.investigation import Hypothesis, InvestigationResult
 from deep_agent.models.root_cause import RootCauseAnalysis
 from deep_agent.nodes.evidence_validation import route_after_evidence_validation, validate_evidence_node
 from deep_agent.nodes import evidence_collection
+from deep_agent.nodes.evidence_collection import _user_input_summary
 from deep_agent.nodes.investigation import route_after_investigation
 from deep_agent.nodes.report_builder import build_final_report_node
 from deep_agent.nodes.root_cause_validation import validate_root_cause_node
@@ -1788,6 +1789,58 @@ def test_source_planner_supports_codebase_only_lookup():
         "user_query": query, "query_understanding": understanding
     })["evidence_source_plan"]
     assert plan.sources == [EvidenceSource.CODEBASE]
+
+
+def test_email_body_question_overrides_incident_like_subject():
+    understanding = extract_business_entities_node({
+        "user_query": (
+            "Investigate the following customer support email thread.\n"
+            "Subject: Payment failed\n\n"
+            "Conversation (oldest to newest):\n"
+            "From: customer@example.com\n"
+            "Date: today\n"
+            "Message: **What is the last campaign run by bigbrosai?**"
+        )
+    })["query_understanding"]
+    assert understanding.intent == "data_retrieval"
+
+
+def test_retrieval_request_is_not_labeled_as_incident():
+    assert _user_input_summary("data_retrieval") == "User-requested data retrieval"
+    assert (
+        _user_input_summary("incident_investigation")
+        == "Customer-reported incident details"
+    )
+
+
+def test_latest_retrieval_requires_exactly_one_sorted_result():
+    item = Evidence(
+        id="ev-campaigns",
+        evidence_type=EvidenceType.DATABASE_QUERY,
+        source="mongodb",
+        summary="campaign query",
+        content={
+            "evidence_role": "final_answer",
+            "error": None,
+            "sort": [["createdAt", -1]],
+            "limit": 5,
+            "rows": [
+                {"name": "Newest", "createdAt": "2026-07-04"},
+                {"name": "Older", "createdAt": "2026-07-01"},
+            ],
+        },
+    )
+    assert final_answer_evidence({
+        "user_query": "What is the last campaign run by bigbrosai?",
+        "evidence": [item],
+    }) is None
+    one_row = item.model_copy(deep=True)
+    one_row.content["limit"] = 1
+    one_row.content["rows"] = [one_row.content["rows"][0]]
+    assert final_answer_evidence({
+        "user_query": "What is the last campaign run by bigbrosai?",
+        "evidence": [one_row],
+    }) is not None
 
 
 def test_source_planner_combines_logs_and_database_for_concrete_id(

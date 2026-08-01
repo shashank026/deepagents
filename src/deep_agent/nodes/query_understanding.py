@@ -13,7 +13,7 @@ BUSINESS_TERMS = {
 
 
 def _intent(query: str) -> str:
-    lowered = query.strip().lower()
+    lowered = _authoritative_request_text(query)
     if any(term in lowered for term in (
         "why", "root cause", "incident", "error", "failed", "failure",
         "not able", "unable", "doesn't work", "does not work",
@@ -29,6 +29,13 @@ def _intent(query: str) -> str:
         "available",
     )):
         return "informational"
+    if re.match(r"^what\s+(?:is|are)\b", lowered) and any(
+        term in lowered for term in (
+            "last ", "latest", "newest", "oldest", "most recent",
+            "highest", "lowest", "maximum", "minimum",
+        )
+    ):
+        return "data_retrieval"
     if re.match(
         r"^(what\s+(?:is|are)|tell\s+me\s+about|provide\s+information)\b",
         lowered,
@@ -40,6 +47,21 @@ def _intent(query: str) -> str:
     ):
         return "data_retrieval"
     return "analysis"
+
+
+def _authoritative_request_text(query: str) -> str:
+    """Prefer the latest explicit email-thread question over subject metadata."""
+    lowered = query.strip().lower()
+    message_questions: list[str] = []
+    for match in re.finditer(
+        r"(?:^|\n)message:\s*(.*?)(?=\n\n---|\Z)",
+        lowered,
+        flags=re.DOTALL,
+    ):
+        question = re.sub(r"[*_`]+", "", match.group(1)).strip()
+        if "?" in question:
+            message_questions.append(question)
+    return message_questions[-1] if message_questions else lowered
 
 
 def extract_business_entities_node(state: InvestigationState) -> dict:

@@ -157,6 +157,11 @@ models—are normalized to native BSON before schema coercion. Database type
 errors request a typed-query retry and do not by themselves escalate the source
 plan to GitHub. Exact code-file reads are reused from the investigation evidence
 ledger so revision rounds do not spend calls re-reading identical paths.
+For mailbox investigations, the latest explicit question in a `Message:` body
+is authoritative for intent; incident-like subject text cannot override a clear
+retrieval request. Ordered retrievals such as last/latest/newest/oldest require
+one sorted `final_answer` row. Exploration samples—even correctly sorted
+ones—trigger a targeted final-proof query instead of an inconclusive report.
 
 Focused symbol evidence retains repository, ref, path, blob SHA, line numbers,
 and bounded source snippets, so decisive logic is not lost when large files are

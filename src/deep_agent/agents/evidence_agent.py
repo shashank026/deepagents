@@ -84,6 +84,10 @@ Your success criteria are:
 Hard execution budget:
 - Use at most 12 tool calls in one evidence-collection round.
 - Do not repeat a query or file read already listed in prior evidence.
+- When Additional evidence requested requires a final proof query, execute it
+  even if an equivalent exploration query already exists. Reuse its verified
+  filters, correct its sort/cardinality, and mark only the new proof query
+  purpose="final_answer".
 - Stop immediately when the decisive evidence is found or when a required
   source is confirmed unavailable.
 

@@ -31,6 +31,14 @@ def _permanent_source_error(error: BaseException | str) -> bool:
     ))
 
 
+def _user_input_summary(intent: str | None) -> str:
+    if intent == "incident_investigation":
+        return "Customer-reported incident details"
+    if intent == "data_retrieval":
+        return "User-requested data retrieval"
+    return "User investigation request"
+
+
 async def collect_evidence_node(
     state: InvestigationState, config: RunnableConfig | None = None
 ) -> dict:
@@ -61,7 +69,9 @@ async def collect_evidence_node(
             id=f"ev-user-input-{investigation_id}",
             evidence_type=EvidenceType.USER_INPUT,
             source="customer_report",
-            summary="Customer-reported incident details",
+            summary=_user_input_summary(
+                understanding.intent if understanding else None
+            ),
             content={
                 "reported_text": state["user_query"],
                 "provenance": "customer_supplied",
