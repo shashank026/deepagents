@@ -62,8 +62,20 @@ async def retrieve_relevant_schema(query: str, limit: int = 8) -> dict[str, Any]
 async def get_table_schema(table_name: str) -> dict[str, Any]:
     """Get schema metadata for a table before constructing a query."""
     result = _get_table(table_name)
-    return await _save(table_name, EvidenceType.DATABASE_SCHEMA,
-                       f"Inspected schema for {table_name}", {"schema": result})
+    if result.get("error"):
+        await _save(
+            table_name,
+            EvidenceType.DATABASE_SCHEMA,
+            f"Schema lookup failed for {table_name}",
+            {"schema": result, "error": result["error"]},
+        )
+        raise ValueError(result["error"])
+    return await _save(
+        table_name,
+        EvidenceType.DATABASE_SCHEMA,
+        f"Inspected schema for {table_name}",
+        {"schema": result},
+    )
 
 
 async def search_database_objects(keyword: str) -> dict[str, Any]:
@@ -301,6 +313,17 @@ async def run_safe_mongodb_query(
 ) -> dict[str, Any]:
     """Execute a read-only MongoDB find or aggregation, capped at 100 documents."""
     try:
+        if (
+            purpose == "final_answer"
+            and not filter_query
+            and not pipeline
+            and not sort
+        ):
+            raise ValueError(
+                "A final-answer MongoDB query requires a verified filter, "
+                "pipeline, or sort; unfiltered samples must use "
+                "purpose='exploration'"
+            )
         result = _run_mongodb_query(
             collection=collection,
             filter_query=filter_query,

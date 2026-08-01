@@ -146,6 +146,12 @@ when it is marked `causal_validation`, was derived from verified schema and
 relationships, directly tests a stated hypothesis, and returns the runtime
 state used by the alleged mechanism. MongoDB filters are recursively validated;
 quoted or unsupported operator keys are rejected before reaching the provider.
+Raw MongoDB tools use a strict argument schema: unknown keys such as `filter`
+cannot be silently discarded in place of `filter_query`. Scalar schema fields
+reject embedded-object predicates, schema misses return explicit failures with
+exact-name suggestions, and an unfiltered find cannot be labeled
+`final_answer`. These checks prevent a malformed targeted query from degrading
+into a successful-looking collection scan.
 
 Focused symbol evidence retains repository, ref, path, blob SHA, line numbers,
 and bounded source snippets, so decisive logic is not lost when large files are

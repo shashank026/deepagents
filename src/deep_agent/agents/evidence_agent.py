@@ -1,4 +1,5 @@
 import os
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
@@ -6,6 +7,8 @@ from langchain.agents.middleware import (
     ModelCallLimitMiddleware,
     ToolCallLimitMiddleware,
 )
+from langchain_core.tools import StructuredTool
+from pydantic import BaseModel, ConfigDict, Field
 
 from deep_agent.models.query import EvidenceSource
 from deep_agent.services.database_context import database_sources
@@ -26,6 +29,34 @@ from deep_agent.tools.evidence_tools import (
 )
 from deep_agent.tools.web_research import web_research_enabled
 from deep_agent.tools.external_sources import log_source_status, SourceUnavailableError
+
+
+class MongoQueryToolInput(BaseModel):
+    """Strict contract: unknown keys fail instead of becoming a scan."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    collection: str
+    filter_query: dict[str, Any] | None = None
+    projection: dict[str, Any] | None = None
+    sort: list[list[Any]] | dict[str, Any] | None = None
+    limit: int = Field(default=100, ge=1, le=100)
+    pipeline: list[dict[str, Any]] | None = None
+    connection_id: str | None = None
+    purpose: Literal[
+        "exploration", "causal_validation", "final_answer"
+    ] = "exploration"
+
+
+STRICT_MONGODB_QUERY_TOOL = StructuredTool.from_function(
+    coroutine=run_safe_mongodb_query,
+    name="run_safe_mongodb_query",
+    description=(
+        "Execute a schema-validated, read-only MongoDB query. Use exactly "
+        "filter_query (never filter) for find predicates."
+    ),
+    args_schema=MongoQueryToolInput,
+)
 
 
 EVIDENCE_AGENT_PROMPT = """
@@ -365,7 +396,7 @@ def create_evidence_agent(sources: set[EvidenceSource] | None = None):
         if providers & {"postgresql", "mysql", "oracle"}:
             tools.append(run_safe_read_query)
         if "mongodb" in providers:
-            tools.append(run_safe_mongodb_query)
+            tools.append(STRICT_MONGODB_QUERY_TOOL)
         inventory = ", ".join(
             f"{source.connection_id}={source.provider.lower()}"
             for source in connected_databases
@@ -396,6 +427,8 @@ def create_evidence_agent(sources: set[EvidenceSource] | None = None):
             "only for a query designed to test a stated incident hypothesis, and "
             "purpose='final_answer' for customer-requested result rows. A failed or "
             "empty exploratory lookup is never evidence of the customer's root cause. "
+            "For raw MongoDB finds the predicate argument is filter_query; filter "
+            "is invalid and must never fall back to an unfiltered collection scan. "
             "Return a final proof record, not an exploratory sample."
         )
     if EvidenceSource.CODEBASE in selected:

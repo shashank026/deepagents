@@ -404,8 +404,22 @@ def _mongodb_field_types(source: Any, collection: str) -> dict[str, str]:
         if collection in {name, qualified}:
             candidates.append(item)
     if not candidates:
+        from difflib import get_close_matches
+
+        available = [
+            str(item.get("name", ""))
+            for item in source.analysis.get("objects", [])
+            if item.get("name")
+        ]
+        suggestions = get_close_matches(collection, available, n=3, cutoff=0.5)
+        hint = (
+            f" Did you mean: {', '.join(repr(item) for item in suggestions)}?"
+            if suggestions
+            else ""
+        )
         raise ValueError(
-            f"Collection {collection!r} is absent from the analyzed schema"
+            f"Collection {collection!r} is absent from the analyzed schema."
+            f"{hint} Use the exact name returned by schema discovery."
         )
     fields = candidates[0].get("fields", [])
     return {
@@ -466,6 +480,13 @@ def _coerce_mongodb_schema_types(
     field: str | None = None,
 ) -> Any:
     if isinstance(value, dict):
+        if field and field in field_types and value:
+            keys = set(value)
+            if not all(key.startswith("$") for key in keys):
+                raise ValueError(
+                    f"Field {field!r} is a scalar {field_types[field]!r}; "
+                    "its filter value cannot be an embedded object"
+                )
         converted = {}
         for key, item in value.items():
             next_field = field if key.startswith("$") else key

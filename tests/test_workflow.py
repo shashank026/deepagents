@@ -1124,7 +1124,10 @@ def test_evidence_agent_exposes_only_provider_compatible_query_tool(
     finally:
         reset_database_sources(token)
 
-    tool_names = {tool.__name__ for tool in captured["tools"]}
+    tool_names = {
+        getattr(tool, "name", getattr(tool, "__name__", ""))
+        for tool in captured["tools"]
+    }
     assert expected_tool in tool_names
     assert excluded_tool not in tool_names
     assert f"db-1={provider}" in captured["system_prompt"]
@@ -1694,6 +1697,32 @@ def test_mongodb_schema_type_coercion_applies_inside_operators():
         {"owner": "objectId"},
     )
     assert value["owner"]["$in"][0].__class__.__name__ == "ObjectId"
+
+
+def test_mongodb_scalar_field_rejects_embedded_object_filter():
+    with pytest.raises(ValueError, match="cannot be an embedded object"):
+        _coerce_mongodb_schema_types(
+            {"organisationId": {"_id": "695653deffb2f9d2eccdd6d1"}},
+            {"organisationId": "ObjectId"},
+        )
+
+
+def test_mongodb_tool_rejects_filter_alias_instead_of_scanning():
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        evidence_agent.MongoQueryToolInput.model_validate({
+            "collection": "organisations",
+            "filter": {"name": "BIGBROS AI"},
+            "purpose": "exploration",
+        })
+
+
+def test_unfiltered_find_cannot_be_marked_final_answer():
+    with pytest.raises(ValueError, match="unfiltered collection sample"):
+        TypedQueryIntent(
+            object_name="wallets",
+            operation="find",
+            purpose="final_answer",
+        )
 
 
 def test_mongodb_ambiguous_string_filter_requires_value_discovery():

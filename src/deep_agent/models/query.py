@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class EvidenceSource(str, Enum):
@@ -61,6 +61,8 @@ class TypedQuerySort(BaseModel):
 class TypedQueryIntent(BaseModel):
     """A safe intermediate representation; it is not executable query text."""
 
+    model_config = ConfigDict(extra="forbid")
+
     object_name: str
     operation: Literal["find", "count", "distinct"] = "find"
     filters: list[TypedQueryFilter] = Field(default_factory=list)
@@ -71,3 +73,17 @@ class TypedQueryIntent(BaseModel):
     purpose: Literal[
         "exploration", "causal_validation", "final_answer"
     ] = "exploration"
+
+    @model_validator(mode="after")
+    def validate_final_answer_scope(self):
+        if (
+            self.purpose == "final_answer"
+            and self.operation == "find"
+            and not self.filters
+            and not self.sort
+        ):
+            raise ValueError(
+                "A final-answer find requires a verified filter or sort; "
+                "an unfiltered collection sample is exploration"
+            )
+        return self
